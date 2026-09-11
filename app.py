@@ -36,13 +36,6 @@ st.markdown("""
     .stButton>button:hover {
         background-color: #0D9488 !important;
     }
-    .metric-card {
-        background-color: #F8FAFC;
-        border-left: 5px solid #1E3A8A;
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 10px;
-    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -67,7 +60,7 @@ c.execute('''CREATE TABLE IF NOT EXISTS vouchers
              (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, voucher_type TEXT, account_type TEXT, account_name TEXT, amount REAL, narration TEXT)''')
 conn.commit()
 
-# Ensure Missing Columns dynamically (Avoid OperationalError)
+# Ensure Missing Columns dynamically
 def ensure_columns():
     try:
         c.execute("ALTER TABLE party_sales ADD COLUMN purchase_cost REAL DEFAULT 0")
@@ -77,7 +70,7 @@ def ensure_columns():
 ensure_columns()
 
 # Populate Default Data
-default_parties = ['Baba Farid Sugar Mill', 'Jalal Din', 'Fojdari', 'Nemat Mill', 'Feed Mill', 'Fatima Mill', 'Cadet College']
+default_parties = ['Baba Farid Sugar Mill', 'Jalal Din', 'Fojdari', 'Nemat Mill', 'Feed Mill', 'Fatima Mill', 'Ravi Rice', 'R.J 39D', 'Malika Rice', 'Cadet College']
 default_vendors = ['Zoom Petroleum', 'Mohaib(Sharoze)', 'Perviaz Petroleum', 'Crown Pso', 'Ittifaq Petroleum']
 
 for p in default_parties:
@@ -123,13 +116,11 @@ if st.sidebar.button("Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
-# Global Average Rates Calculation
 def get_avg_purchase_cost(fuel_type):
     res = pd.read_sql_query("SELECT AVG(rate) as avg_rate FROM vendor_purchases WHERE fuel_type=?", conn, params=(fuel_type,))
     val = res['avg_rate'].iloc[0]
     return val if val and val > 0 else (240.0 if fuel_type=="Petrol" else 250.0)
 
-# Default Rates
 if 'petrol_sale_rate' not in st.session_state: st.session_state.petrol_sale_rate = 270.0
 if 'diesel_sale_rate' not in st.session_state: st.session_state.diesel_sale_rate = 280.0
 
@@ -174,13 +165,23 @@ if menu == "📊 Executive Dashboard & Profit":
     c_col1, c_col2 = st.columns(2)
     with c_col1:
         st.write("### 👥 Customer Credit Ledger Summary")
-        st.dataframe(p_summary[['Sr. No.', 'party_name', 'opening_balance', 'Total Outstanding']].rename(
-            columns={'party_name':'Party Name', 'opening_balance':'Op. Balance', 'Total Outstanding':'Net Balance'}), use_container_width=True)
+        st.dataframe(
+            p_summary[['Sr. No.', 'party_name', 'opening_balance', 'Total Outstanding']].rename(
+                columns={'party_name':'Party Name', 'opening_balance':'Op. Balance', 'Total Outstanding':'Net Balance'}
+            ), 
+            use_container_width=True, 
+            hide_index=True
+        )
         
     with c_col2:
         st.write("### 🚛 Vendor Liabilities Summary")
-        st.dataframe(v_summary[['Sr. No.', 'vendor_name', 'opening_balance', 'Total Payable']].rename(
-            columns={'vendor_name':'Vendor Name', 'opening_balance':'Op. Balance', 'Total Payable':'Net Payable'}), use_container_width=True)
+        st.dataframe(
+            v_summary[['Sr. No.', 'vendor_name', 'opening_balance', 'Total Payable']].rename(
+                columns={'vendor_name':'Vendor Name', 'opening_balance':'Op. Balance', 'Total Payable':'Net Payable'}
+            ), 
+            use_container_width=True, 
+            hide_index=True
+        )
 
 # ---------------- MODULE 2: PARTY CREDIT SALES ----------------
 elif menu == "⛽ Party Daily Sale & Credit":
@@ -260,7 +261,6 @@ elif menu == "🧾 Debit / Credit Voucher":
         c.execute("INSERT INTO vouchers (date, voucher_type, account_type, account_name, amount, narration) VALUES (?, ?, ?, ?, ?, ?)",
                   (str(v_date), v_type, account_type, acc_name, v_amount, narration))
         
-        # Adjusting Ledger Table Balances
         if account_type == "Party / Customer":
             c.execute("INSERT INTO party_sales (date, party_name, fuel_type, qty, rate, purchase_cost, total, paid, balance) VALUES (?, ?, 'Voucher Payment', 0, 0, 0, 0, ?, ?)",
                       (str(v_date), acc_name, v_amount, -v_amount))
@@ -290,7 +290,7 @@ elif menu == "📑 Customer / Vendor Statements & Bills":
         
         df.insert(0, 'Sr. No.', range(1, 1 + len(df)))
         st.write(f"### Statement for: *{party_name}* | Opening Balance: *Rs. {op_bal:,.2f}*")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.metric("Net Receivable Balance", f"Rs. {(op_bal + df['Credit'].sum()):,.2f}")
         
     else:
@@ -301,7 +301,7 @@ elif menu == "📑 Customer / Vendor Statements & Bills":
         
         df.insert(0, 'Sr. No.', range(1, 1 + len(df)))
         st.write(f"### Vendor Statement: *{vendor_name}* | Opening Balance: *Rs. {op_bal:,.2f}*")
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
         st.metric("Net Vendor Payable", f"Rs. {(op_bal + df['Payable'].sum()):,.2f}")
 
 # ---------------- MODULE 6: MASTER SETUP ----------------
@@ -355,7 +355,7 @@ elif menu == "⚙️ Master Setup (Parties/Vendors)":
 # ---------------- MODULE 7: BACKUP & RECOVERY ----------------
 elif menu == "💾 Backup & System Recovery":
     st.subheader("💾 Data Backup & Recovery Center")
-    st.write("Agar aap chahain toh kisi bhi waqt apna mukammal data Excel sheets me download kar saktay hain taake safe rahey.")
+    st.write("Download your complete database backups anytime:")
     
     df_p = pd.read_sql_query("SELECT * FROM party_sales", conn)
     df_v = pd.read_sql_query("SELECT * FROM vendor_purchases", conn)
