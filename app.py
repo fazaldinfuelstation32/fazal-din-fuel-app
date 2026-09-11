@@ -15,7 +15,7 @@ st.set_page_config(
 st.markdown("""
     <style>
     .main-header {
-        font-size: 30px;
+        font-size: 28px;
         font-weight: bold;
         color: white;
         background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 50%, #0D9488 100%);
@@ -57,13 +57,18 @@ c.execute('''CREATE TABLE IF NOT EXISTS vendor_purchases
              (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, vendor_name TEXT, fuel_type TEXT, qty REAL, rate REAL, total REAL, paid REAL, balance REAL)''')
 
 c.execute('''CREATE TABLE IF NOT EXISTS vouchers 
-             (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, voucher_type TEXT, account_type TEXT, account_name TEXT, amount REAL, narration TEXT)''')
+             (id INTEGER PRIMARY KEY AUTOINCREMENT, voucher_no TEXT, date TEXT, voucher_type TEXT, account_type TEXT, account_name TEXT, amount REAL, narration TEXT)''')
 conn.commit()
 
 # Ensure Missing Columns dynamically
 def ensure_columns():
     try:
         c.execute("ALTER TABLE party_sales ADD COLUMN purchase_cost REAL DEFAULT 0")
+        conn.commit()
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE vouchers ADD COLUMN voucher_no TEXT")
         conn.commit()
     except:
         pass
@@ -78,6 +83,18 @@ for p in default_parties:
 for v in default_vendors:
     c.execute("INSERT OR IGNORE INTO vendors (vendor_name, opening_balance) VALUES (?, 0)", (v,))
 conn.commit()
+
+# Helper Functions
+def generate_voucher_no():
+    today_str = datetime.now().strftime("%Y%m%d")
+    c.execute("SELECT COUNT(*) FROM vouchers WHERE voucher_no LIKE ?", (f"VCH-{today_str}-%",))
+    count = c.fetchone()[0] + 1
+    return f"VCH-{today_str}-{count:04d}"
+
+def get_avg_purchase_cost(fuel_type):
+    res = pd.read_sql_query("SELECT AVG(rate) as avg_rate FROM vendor_purchases WHERE fuel_type=?", conn, params=(fuel_type,))
+    val = res['avg_rate'].iloc[0]
+    return val if val and val > 0 else (240.0 if fuel_type=="Petrol" else 250.0)
 
 # ---------------- LOGIN AUTHENTICATION ----------------
 if 'authenticated' not in st.session_state:
@@ -100,13 +117,18 @@ if not st.session_state.authenticated:
 # Header
 st.markdown('<div class="main-header">⛽ FAZAL DIN FUEL STATION - OFFICIAL MANAGEMENT PORTAL</div>', unsafe_allow_html=True)
 
+if 'petrol_sale_rate' not in st.session_state: st.session_state.petrol_sale_rate = 270.0
+if 'diesel_sale_rate' not in st.session_state: st.session_state.diesel_sale_rate = 280.0
+
 # ---------------- SIDEBAR NAVIGATION ----------------
 st.sidebar.title("📌 Navigation Menu")
 menu = st.sidebar.radio("Select Portal Module:", [
-    "📊 Executive Dashboard & Profit", 
+    "📊 Dashboard & Separate Fuel Breakdown", 
     "⛽ Party Daily Sale & Credit", 
     "🚛 Vendor Purchasing & Dip Stock", 
+    "📦 Stock Matching & Monthly Reconciliation",
     "🧾 Debit / Credit Voucher", 
+    "✏️ Edit / Delete Entries",
     "📑 Customer / Vendor Statements & Bills", 
     "⚙️ Master Setup (Parties/Vendors)",
     "💾 Backup & System Recovery"
@@ -116,17 +138,9 @@ if st.sidebar.button("Logout"):
     st.session_state.authenticated = False
     st.rerun()
 
-def get_avg_purchase_cost(fuel_type):
-    res = pd.read_sql_query("SELECT AVG(rate) as avg_rate FROM vendor_purchases WHERE fuel_type=?", conn, params=(fuel_type,))
-    val = res['avg_rate'].iloc[0]
-    return val if val and val > 0 else (240.0 if fuel_type=="Petrol" else 250.0)
-
-if 'petrol_sale_rate' not in st.session_state: st.session_state.petrol_sale_rate = 270.0
-if 'diesel_sale_rate' not in st.session_state: st.session_state.diesel_sale_rate = 280.0
-
-# ---------------- MODULE 1: DASHBOARD & PROFIT ----------------
-if menu == "📊 Executive Dashboard & Profit":
-    st.subheader("📊 Financial Overview & Profit / Loss Engine")
+# ---------------- MODULE 1: DASHBOARD ----------------
+if menu == "📊 Dashboard & Separate Fuel Breakdown":
+    st.subheader("📊 Station Dashboard & Fuel Wise Breakdown")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -150,21 +164,24 @@ if menu == "📊 Executive Dashboard & Profit":
     v_summary['Total Payable'] = v_summary['opening_balance'] + v_summary['total_bal']
     v_summary.insert(0, 'Sr. No.', range(1, 1 + len(v_summary)))
 
-    # Real-time Profitability Calculation
-    profit_df = pd.read_sql_query("SELECT SUM(total) as revenue, SUM(qty * purchase_cost) as cost_of_goods FROM party_sales", conn)
-    rev = profit_df['revenue'].iloc[0] if profit_df['revenue'].iloc[0] else 0.0
-    cog = profit_df['cost_of_goods'].iloc[0] if profit_df['cost_of_goods'].iloc[0] else 0.0
-    est_profit = rev - cog
+    # Fuel Liters Statistics
+    p_purchased = pd.read_sql_query("SELECT SUM(qty) as total FROM vendor_purchases WHERE fuel_type='Petrol'", conn)['total'].iloc[0] or 0.0
+    p_sold = pd.read_sql_query("SELECT SUM(qty) as total FROM party_sales WHERE fuel_type='Petrol'", conn)['total'].iloc[0] or 0.0
+    
+    d_purchased = pd.read_sql_query("SELECT SUM(qty) as total FROM vendor_purchases WHERE fuel_type='Diesel'", conn)['total'].iloc[0] or 0.0
+    d_sold = pd.read_sql_query("SELECT SUM(qty) as total FROM party_sales WHERE fuel_type='Diesel'", conn)['total'].iloc[0] or 0.0
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("💰 Total Party Credit Outstanding", f"Rs. {p_summary['Total Outstanding'].sum():,.2f}")
-    m2.metric("🛑 Total Vendor Liabilities", f"Rs. {v_summary['Total Payable'].sum():,.2f}")
-    m3.metric("📈 Estimated Gross Profit", f"Rs. {est_profit:,.2f}", delta=f"{(est_profit/rev*100):.1f}% Margin" if rev>0 else "0%")
+    # Summary Cards
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("💰 Total Party Receivables", f"Rs. {p_summary['Total Outstanding'].sum():,.2f}")
+    c2.metric("🛑 Total Vendor Payables", f"Rs. {v_summary['Total Payable'].sum():,.2f}")
+    c3.metric("⛽ Petrol Net Stock", f"{(p_purchased - p_sold):,.2f} Ltrs", delta=f"In: {p_purchased:,.0f} L | Out: {p_sold:,.0f} L")
+    c4.metric("🛢️ Diesel Net Stock", f"{(d_purchased - d_sold):,.2f} Ltrs", delta=f"In: {d_purchased:,.0f} L | Out: {d_sold:,.0f} L")
 
     st.divider()
     c_col1, c_col2 = st.columns(2)
     with c_col1:
-        st.write("### 👥 Customer Credit Ledger Summary")
+        st.write("### 👥 Customer Credit Ledger (Receivables)")
         st.dataframe(
             p_summary[['Sr. No.', 'party_name', 'opening_balance', 'Total Outstanding']].rename(
                 columns={'party_name':'Party Name', 'opening_balance':'Op. Balance', 'Total Outstanding':'Net Balance'}
@@ -174,7 +191,7 @@ if menu == "📊 Executive Dashboard & Profit":
         )
         
     with c_col2:
-        st.write("### 🚛 Vendor Liabilities Summary")
+        st.write("### 🚛 Vendor Liabilities (Payables)")
         st.dataframe(
             v_summary[['Sr. No.', 'vendor_name', 'opening_balance', 'Total Payable']].rename(
                 columns={'vendor_name':'Vendor Name', 'opening_balance':'Op. Balance', 'Total Payable':'Net Payable'}
@@ -235,14 +252,54 @@ elif menu == "🚛 Vendor Purchasing & Dip Stock":
     st.info(f"Invoice Total: *Rs. {p_total:,.2f}* | Remaining Vendor Balance: *Rs. {p_balance:,.2f}*")
     
     if st.button("Save Vendor Purchase Entry"):
-        c.execute("INSERT INTO vendor_purchases (date, vendor_name, fuel_type, qty, rate, total, paid, balance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        c.execute("INSERT INTO vendor_purchases (date, vendor_name, fuel_type, qty, rate, total, paid, balance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                   (str(p_date), selected_vendor, p_fuel, p_qty, p_rate, p_total, p_paid, p_balance))
         conn.commit()
         st.success("Purchase Entry Posted!")
 
-# ---------------- MODULE 4: VOUCHER GENERATOR ----------------
+# ---------------- MODULE 4: STOCK RECONCILIATION ----------------
+elif menu == "📦 Stock Matching & Monthly Reconciliation":
+    st.subheader("📦 Monthly Purchase Stock vs Sale Matching Engine")
+    
+    s_col1, s_col2 = st.columns(2)
+    m_start = s_col1.date_input("Start Date", datetime(2026, 9, 1))
+    m_end = s_col2.date_input("End Date", datetime.now())
+    
+    st.divider()
+    
+    p_in = pd.read_sql_query("SELECT SUM(qty) as total FROM vendor_purchases WHERE fuel_type='Petrol' AND date BETWEEN ? AND ?", conn, params=(str(m_start), str(m_end)))['total'].iloc[0] or 0.0
+    p_out = pd.read_sql_query("SELECT SUM(qty) as total FROM party_sales WHERE fuel_type='Petrol' AND date BETWEEN ? AND ?", conn, params=(str(m_start), str(m_end)))['total'].iloc[0] or 0.0
+    
+    d_in = pd.read_sql_query("SELECT SUM(qty) as total FROM vendor_purchases WHERE fuel_type='Diesel' AND date BETWEEN ? AND ?", conn, params=(str(m_start), str(m_end)))['total'].iloc[0] or 0.0
+    d_out = pd.read_sql_query("SELECT SUM(qty) as total FROM party_sales WHERE fuel_type='Diesel' AND date BETWEEN ? AND ?", conn, params=(str(m_start), str(m_end)))['total'].iloc[0] or 0.0
+    
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("### ⛽ Petrol Reconciliation")
+        st.write(f"- Total Purchased Stock: *{p_in:,.2f} Liters*")
+        st.write(f"- Total Credit Sold Stock: *{p_out:,.2f} Liters*")
+        diff_p = p_in - p_out
+        if diff_p >= 0:
+            st.success(f"Remaining Dip Stock Balance: *{diff_p:,.2f} Liters*")
+        else:
+            st.warning(f"Stock Deficit / Excess Sale: *{diff_p:,.2f} Liters*")
+            
+    with col_b:
+        st.markdown("### 🛢️ Diesel Reconciliation")
+        st.write(f"- Total Purchased Stock: *{d_in:,.2f} Liters*")
+        st.write(f"- Total Credit Sold Stock: *{d_out:,.2f} Liters*")
+        diff_d = d_in - d_out
+        if diff_d >= 0:
+            st.success(f"Remaining Dip Stock Balance: *{diff_d:,.2f} Liters*")
+        else:
+            st.warning(f"Stock Deficit / Excess Sale: *{diff_d:,.2f} Liters*")
+
+# ---------------- MODULE 5: VOUCHER GENERATOR ----------------
 elif menu == "🧾 Debit / Credit Voucher":
     st.subheader("🧾 Create Payment Receipt / Delivery Voucher")
+    
+    v_no = generate_voucher_no()
+    st.write(f"#### Generated Voucher Number: *{v_no}*")
     
     v_type = st.radio("Voucher Type", ["Receipt Voucher (Cash In)", "Payment Voucher (Cash Out)"])
     account_type = st.selectbox("Account Category", ["Party / Customer", "Vendor"])
@@ -258,8 +315,8 @@ elif menu == "🧾 Debit / Credit Voucher":
     narration = st.text_area("Details / Bank / Slip No / Narration")
     
     if st.button("Generate & Save Voucher"):
-        c.execute("INSERT INTO vouchers (date, voucher_type, account_type, account_name, amount, narration) VALUES (?, ?, ?, ?, ?, ?)",
-                  (str(v_date), v_type, account_type, acc_name, v_amount, narration))
+        c.execute("INSERT INTO vouchers (voucher_no, date, voucher_type, account_type, account_name, amount, narration) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (v_no, str(v_date), v_type, account_type, acc_name, v_amount, narration))
         
         if account_type == "Party / Customer":
             c.execute("INSERT INTO party_sales (date, party_name, fuel_type, qty, rate, purchase_cost, total, paid, balance) VALUES (?, ?, 'Voucher Payment', 0, 0, 0, 0, ?, ?)",
@@ -269,9 +326,77 @@ elif menu == "🧾 Debit / Credit Voucher":
                       (str(v_date), acc_name, v_amount, -v_amount))
             
         conn.commit()
-        st.success("Voucher Posted and Ledger Updated!")
+        st.success(f"Voucher {v_no} Posted and Ledger Updated!")
 
-# ---------------- MODULE 5: STATEMENTS & BILLS ----------------
+# ---------------- MODULE 6: EDIT / DELETE ENTRIES ----------------
+elif menu == "✏️ Edit / Delete Entries":
+    st.subheader("✏️ Manage, Edit & Delete Recorded Entries")
+    
+    tab_e1, tab_e2 = st.tabs(["⛽ Edit Party Sales", "🚛 Edit Vendor Purchases"])
+    
+    with tab_e1:
+        st.write("#### Party Sales Records")
+        ps_df = pd.read_sql_query("SELECT id, date, party_name, fuel_type, qty, rate, total, paid, balance FROM party_sales ORDER BY id DESC", conn)
+        if not ps_df.empty:
+            sel_sale_id = st.selectbox("Select Party Sale ID to Modify", ps_df['id'].tolist())
+            curr_row = ps_df[ps_df['id'] == sel_sale_id].iloc[0]
+            
+            e_col1, e_col2, e_col3 = st.columns(3)
+            e_qty = e_col1.number_input("Edit Qty", value=float(curr_row['qty']))
+            e_rate = e_col2.number_input("Edit Rate", value=float(curr_row['rate']))
+            e_paid = e_col3.number_input("Edit Paid Amount", value=float(curr_row['paid']))
+            
+            e_total = e_qty * e_rate
+            e_bal = e_total - e_paid
+            
+            c_ed1, c_ed2 = st.columns(2)
+            if c_ed1.button("Update Party Entry"):
+                c.execute("UPDATE party_sales SET qty=?, rate=?, total=?, paid=?, balance=? WHERE id=?", 
+                          (e_qty, e_rate, e_total, e_paid, e_bal, sel_sale_id))
+                conn.commit()
+                st.success("Record Updated Successfully!")
+                st.rerun()
+                
+            if c_ed2.button("Delete Party Entry"):
+                c.execute("DELETE FROM party_sales WHERE id=?", (sel_sale_id,))
+                conn.commit()
+                st.warning("Record Deleted!")
+                st.rerun()
+                
+            st.dataframe(ps_df, use_container_width=True, hide_index=True)
+
+    with tab_e2:
+        st.write("#### Vendor Purchase Records")
+        vp_df = pd.read_sql_query("SELECT id, date, vendor_name, fuel_type, qty, rate, total, paid, balance FROM vendor_purchases ORDER BY id DESC", conn)
+        if not vp_df.empty:
+            sel_pur_id = st.selectbox("Select Vendor Purchase ID to Modify", vp_df['id'].tolist())
+            curr_v_row = vp_df[vp_df['id'] == sel_pur_id].iloc[0]
+            
+            ev_col1, ev_col2, ev_col3 = st.columns(3)
+            ev_qty = ev_col1.number_input("Edit Vendor Qty", value=float(curr_v_row['qty']))
+            ev_rate = ev_col2.number_input("Edit Vendor Rate", value=float(curr_v_row['rate']))
+            ev_paid = ev_col3.number_input("Edit Vendor Paid", value=float(curr_v_row['paid']))
+            
+            ev_total = ev_qty * ev_rate
+            ev_bal = ev_total - ev_paid
+            
+            cv_ed1, cv_ed2 = st.columns(2)
+            if cv_ed1.button("Update Vendor Entry"):
+                c.execute("UPDATE vendor_purchases SET qty=?, rate=?, total=?, paid=?, balance=? WHERE id=?", 
+                          (ev_qty, ev_rate, ev_total, ev_paid, ev_bal, sel_pur_id))
+                conn.commit()
+                st.success("Vendor Record Updated!")
+                st.rerun()
+                
+            if cv_ed2.button("Delete Vendor Entry"):
+                c.execute("DELETE FROM vendor_purchases WHERE id=?", (sel_pur_id,))
+                conn.commit()
+                st.warning("Vendor Record Deleted!")
+                st.rerun()
+                
+            st.dataframe(vp_df, use_container_width=True, hide_index=True)
+
+# ---------------- MODULE 7: STATEMENTS & BILLS ----------------
 elif menu == "📑 Customer / Vendor Statements & Bills":
     st.subheader("📑 Date-Wise Detailed Ledger Statements")
     
@@ -304,7 +429,7 @@ elif menu == "📑 Customer / Vendor Statements & Bills":
         st.dataframe(df, use_container_width=True, hide_index=True)
         st.metric("Net Vendor Payable", f"Rs. {(op_bal + df['Payable'].sum()):,.2f}")
 
-# ---------------- MODULE 6: MASTER SETUP ----------------
+# ---------------- MODULE 8: MASTER SETUP ----------------
 elif menu == "⚙️ Master Setup (Parties/Vendors)":
     st.subheader("⚙️ Manage Parties, Vendors & Opening Balances")
     
@@ -352,7 +477,7 @@ elif menu == "⚙️ Master Setup (Parties/Vendors)":
                 st.success("Vendor Removed!")
                 st.rerun()
 
-# ---------------- MODULE 7: BACKUP & RECOVERY ----------------
+# ---------------- MODULE 9: BACKUP & RECOVERY ----------------
 elif menu == "💾 Backup & System Recovery":
     st.subheader("💾 Data Backup & Recovery Center")
     st.write("Download your complete database backups anytime:")
