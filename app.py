@@ -39,7 +39,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---------------- DATABASE INIT & SCHEMA FIXES ----------------
+# ---------------- DATABASE INIT & SCHEMA AUTO-FIXES ----------------
 conn = sqlite3.connect('fuel_station.db', check_same_thread=False)
 c = conn.cursor()
 
@@ -60,19 +60,29 @@ c.execute('''CREATE TABLE IF NOT EXISTS vouchers
              (id INTEGER PRIMARY KEY AUTOINCREMENT, voucher_no TEXT, date TEXT, voucher_type TEXT, account_type TEXT, account_name TEXT, amount REAL, narration TEXT)''')
 conn.commit()
 
-# Ensure Missing Columns dynamically
-def ensure_columns():
-    try:
-        c.execute("ALTER TABLE party_sales ADD COLUMN purchase_cost REAL DEFAULT 0")
-        conn.commit()
-    except:
-        pass
-    try:
-        c.execute("ALTER TABLE vouchers ADD COLUMN voucher_no TEXT")
-        conn.commit()
-    except:
-        pass
-ensure_columns()
+# Ensure Missing Columns dynamically to fix SQLite operational errors
+def auto_migrate_db():
+    # Fix vouchers table if missing voucher_no
+    c.execute("PRAGMA table_info(vouchers)")
+    voucher_cols = [col[1] for col in c.fetchall()]
+    if 'voucher_no' not in voucher_cols:
+        try:
+            c.execute("ALTER TABLE vouchers ADD COLUMN voucher_no TEXT")
+            conn.commit()
+        except:
+            pass
+
+    # Fix party_sales table if missing purchase_cost
+    c.execute("PRAGMA table_info(party_sales)")
+    ps_cols = [col[1] for col in c.fetchall()]
+    if 'purchase_cost' not in ps_cols:
+        try:
+            c.execute("ALTER TABLE party_sales ADD COLUMN purchase_cost REAL DEFAULT 0")
+            conn.commit()
+        except:
+            pass
+
+auto_migrate_db()
 
 # Populate Default Data
 default_parties = ['Baba Farid Sugar Mill', 'Jalal Din', 'Fojdari', 'Nemat Mill', 'Feed Mill', 'Fatima Mill', 'Ravi Rice', 'R.J 39D', 'Malika Rice', 'Cadet College']
