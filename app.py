@@ -33,21 +33,58 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-        .main { background-color: #f7f9fc; }
+        /* ===== FD CNG Fuel Station Theme ===== */
+        .main { background-color: #f4f7f5; }
+
+        /* Title banner - fuel pump green/orange gradient */
         .app-title {
-            font-size: 26px; font-weight: 700; color: #14532d;
-            padding: 12px 18px; background: #e8f5e9;
-            border-left: 6px solid #2e7d32; border-radius: 8px; margin-bottom: 18px;
+            font-size: 26px; font-weight: 800; color: #ffffff;
+            padding: 16px 22px; margin-bottom: 20px;
+            background: linear-gradient(90deg, #0b5d34 0%, #1c8b4e 55%, #2e7d32 100%);
+            border-left: 8px solid #f57c00;
+            border-radius: 10px;
+            box-shadow: 0 3px 10px rgba(11,93,52,.25);
+            letter-spacing: .3px;
         }
+
+        /* Sidebar styling */
+        section[data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #0b3d24 0%, #14532d 100%);
+        }
+        section[data-testid="stSidebar"] * { color: #f0fdf4 !important; }
+        section[data-testid="stSidebar"] .stRadio > label { color: #f0fdf4 !important; }
+        section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.2); }
+
+        /* Metric cards */
         .metric-card {
-            background: #ffffff; border: 1px solid #e3e8ef; border-radius: 12px;
-            padding: 16px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+            background: #ffffff; border: 1px solid #e3e8ef; border-top: 4px solid #f57c00;
+            border-radius: 12px; padding: 16px; text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,.06);
         }
-        .metric-card h4 { margin: 0; font-size: 14px; color: #64748b; font-weight: 600; }
-        .metric-card p  { margin: 6px 0 0; font-size: 20px; font-weight: 700; color: #0f172a; }
+        .metric-card h4 { margin: 0; font-size: 13px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
+        .metric-card p  { margin: 8px 0 0; font-size: 21px; font-weight: 800; color: #0b3d24; }
+
+        /* Review / preview box */
         .review-box {
-            background:#fffbeb; border:1px solid #fcd34d; border-radius:10px; padding:14px;
+            background:#fff7e6; border:1px solid #f57c00; border-left: 6px solid #f57c00;
+            border-radius:10px; padding:14px; margin-bottom: 10px;
         }
+
+        /* Buttons */
+        div.stButton > button, div.stFormSubmitButton > button, div.stDownloadButton > button {
+            background: linear-gradient(90deg, #1c8b4e, #2e7d32);
+            color: #ffffff; border: none; border-radius: 8px; font-weight: 700;
+            box-shadow: 0 2px 4px rgba(0,0,0,.15);
+        }
+        div.stButton > button:hover, div.stFormSubmitButton > button:hover, div.stDownloadButton > button:hover {
+            background: linear-gradient(90deg, #f57c00, #ef6c00); color:#fff;
+        }
+
+        /* Tabs */
+        button[data-baseweb="tab"] { font-weight: 700; }
+
+        /* Dataframe header tint */
+        [data-testid="stDataFrame"] { border: 1px solid #e3e8ef; border-radius: 8px; overflow: hidden; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -154,9 +191,15 @@ def init_db():
             rate REAL DEFAULT 0.0,
             debit REAL DEFAULT 0.0,
             credit REAL DEFAULT 0.0,
-            description TEXT
+            description TEXT,
+            voucher_no TEXT
         )"""
     )
+
+    # --- Migration: add voucher_no column if an older DB file already exists without it ---
+    existing_cols = [r[1] for r in cur.execute("PRAGMA table_info(ledger)").fetchall()]
+    if "voucher_no" not in existing_cols:
+        cur.execute("ALTER TABLE ledger ADD COLUMN voucher_no TEXT")
 
     existing = pd.read_sql_query("SELECT name FROM parties", conn)["name"].tolist()
 
@@ -274,6 +317,104 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
     if df is not None and not df.empty:
         st.download_button(label, df.to_csv(index=True).encode("utf-8"),
                            file_name=filename, mime="text/csv")
+
+
+def next_voucher_no() -> str:
+    """Suggest the next voucher number as V-00001, V-00002 ... based on the highest
+    numeric part already used (so it stays correct even after deletes)."""
+    conn = get_db_connection()
+    rows = conn.execute("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL").fetchall()
+    conn.close()
+    max_n = 0
+    for r in rows:
+        digits = "".join(ch for ch in (r["voucher_no"] or "") if ch.isdigit())
+        if digits:
+            max_n = max(max_n, int(digits))
+    return f"V-{max_n + 1:05d}"
+
+
+def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: float,
+                            stmt: pd.DataFrame, from_date, to_date):
+    """Builds a print-friendly HTML statement with a button that opens the browser's
+    native print dialog directly (Ctrl/Cmd+P equivalent) - no PDF / file save step."""
+    import streamlit.components.v1 as components
+
+    rows_html = ""
+    for i, (_, r) in enumerate(stmt.iterrows(), start=1):
+        rows_html += f"""
+        <tr>
+            <td>{i}</td>
+            <td>{r['Voucher No'] if pd.notna(r.get('Voucher No')) else ''}</td>
+            <td>{r['Date']}</td>
+            <td>{r['Fuel'] if pd.notna(r['Fuel']) else '-'}</td>
+            <td class="num">{r['Ltrs']:,.2f}</td>
+            <td class="num">{r['Rate']:,.2f}</td>
+            <td class="num">{r['Debit']:,.2f}</td>
+            <td class="num">{r['Credit']:,.2f}</td>
+            <td>{r['Description'] or ''}</td>
+            <td class="num">{r['Running Balance']:,.2f}</td>
+        </tr>"""
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+        body {{ font-family: Arial, Helvetica, sans-serif; color:#0b3d24; margin:0; padding:0; }}
+        .sheet {{ padding: 18px 22px; }}
+        .head {{
+            background: linear-gradient(90deg,#0b5d34,#2e7d32);
+            color:#fff; padding:14px 18px; border-radius:8px; border-left:8px solid #f57c00;
+            margin-bottom:14px;
+        }}
+        .head h2 {{ margin:0; font-size:20px; }}
+        .head p {{ margin:2px 0 0; font-size:13px; opacity:.9; }}
+        .info {{ display:flex; justify-content:space-between; margin-bottom:12px; font-size:14px; }}
+        .info div {{ background:#f4f7f5; border:1px solid #e3e8ef; border-radius:6px; padding:8px 12px; }}
+        table {{ width:100%; border-collapse: collapse; font-size:12.5px; }}
+        th {{ background:#0b3d24; color:#fff; padding:6px 8px; text-align:left; }}
+        td {{ padding:6px 8px; border-bottom:1px solid #e3e8ef; }}
+        td.num, th.num {{ text-align:right; }}
+        tr:nth-child(even) {{ background:#f8faf9; }}
+        .totals {{ margin-top:12px; text-align:right; font-size:14px; font-weight:bold; }}
+        .print-btn {{
+            background:linear-gradient(90deg,#1c8b4e,#2e7d32); color:#fff; border:none;
+            padding:10px 22px; border-radius:8px; font-weight:bold; font-size:14px;
+            cursor:pointer; margin-bottom:14px;
+        }}
+        @media print {{ .print-btn {{ display:none; }} }}
+    </style>
+    </head>
+    <body>
+        <div class="sheet">
+            <button class="print-btn" onclick="window.print()">🖨️ Print Statement Now</button>
+            <div class="head">
+                <h2>⛽ FD CNG Fuel Station</h2>
+                <p>{p_type} Statement &nbsp;|&nbsp; {from_date} to {to_date}</p>
+            </div>
+            <div class="info">
+                <div><b>Party:</b> {party}</div>
+                <div><b>Opening Balance:</b> Rs. {op_bal:,.2f}</div>
+                <div><b>Closing Balance:</b> Rs. {closing_bal:,.2f}</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Sr.</th><th>Voucher No</th><th>Date</th><th>Fuel</th>
+                        <th class="num">Ltrs</th><th class="num">Rate</th>
+                        <th class="num">Debit</th><th class="num">Credit</th>
+                        <th>Description</th><th class="num">Running Balance</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html if rows_html else '<tr><td colspan="10" style="text-align:center;">No entries in this range</td></tr>'}
+                </tbody>
+            </table>
+            <div class="totals">Closing Balance: Rs. {closing_bal:,.2f}</div>
+        </div>
+    </body>
+    </html>
+    """
+    components.html(html, height=650, scrolling=True)
 
 
 # ==========================================
@@ -414,8 +555,8 @@ elif module == "📄 Customer/Vendor Statements & Print":
         row = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party,)).fetchone()
         op_bal = row["opening_balance"] if row else 0.0
         stmt = pd.read_sql_query(
-            """SELECT id AS [Entry ID], txn_date AS Date, item_type AS Fuel, qty_ltrs AS Ltrs,
-                      rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
+            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
+                      qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
                FROM ledger WHERE party_name = ? AND txn_date BETWEEN ? AND ?
                ORDER BY txn_date ASC, id ASC""",
             conn, params=(party, str(from_date), str(to_date)))
@@ -426,12 +567,18 @@ elif module == "📄 Customer/Vendor Statements & Print":
             bal += (r["Debit"] - r["Credit"]) if p_type == "Customer" else (r["Credit"] - r["Debit"])
             rows.append(bal)
         stmt["Running Balance"] = rows
+        closing_bal = rows[-1] if rows else op_bal
 
         st.info(f"**{party}** | Type: {p_type} | Opening Balance: Rs. {op_bal:,.2f} | "
-                f"Closing Balance: Rs. {(rows[-1] if rows else op_bal):,.2f}")
-        stmt = sr_index(stmt)
-        st.dataframe(stmt, use_container_width=True)
-        download_csv(stmt, f"{party}_statement.csv", "⬇️ Download / Print (CSV)")
+                f"Closing Balance: Rs. {closing_bal:,.2f}")
+        stmt_view = sr_index(stmt)
+        st.dataframe(stmt_view, use_container_width=True)
+        download_csv(stmt_view, f"{party}_statement.csv", "⬇️ Download CSV")
+
+        st.markdown("### 🖨️ Print Statement")
+        st.caption("Click the green button below and use the browser's print dialog to send this "
+                   "statement straight to your printer — no need to save a file first.")
+        render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
 # MODULE 4: DAILY STOCK REGISTER  (dip difference fixed)
@@ -585,6 +732,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             txn_date = st.date_input("Transaction Date", date.today())
             party_name = st.selectbox("Customer Name", customers if customers else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Cash Payment/Voucher"])
+            voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
         with c2:
             qty = st.number_input("Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
             rate = st.number_input("Rate", min_value=0.0, value=0.0, step=0.1)
@@ -594,7 +742,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
 
     if review_cust and party_name != "None":
         st.session_state["cust_pending"] = dict(
-            txn_date=str(txn_date), party_name=party_name, fuel=fuel,
+            txn_date=str(txn_date), party_name=party_name, fuel=fuel, voucher_no=voucher_no.strip(),
             qty=qty, rate=rate, payment=payment, desc=desc)
 
     pend = st.session_state.get("cust_pending")
@@ -603,8 +751,8 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         credit = pend["payment"]
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
-            "Date": pend["txn_date"], "Customer": pend["party_name"], "Fuel": pend["fuel"],
-            "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
+            "Voucher No": pend["voucher_no"], "Date": pend["txn_date"], "Customer": pend["party_name"],
+            "Fuel": pend["fuel"], "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
             "Sale (Debit)": f"{debit:,.2f}", "Received (Credit)": f"{credit:,.2f}",
             "Description": pend["desc"],
         }]))
@@ -619,11 +767,11 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             else:
                 conn = get_db_connection()
                 conn.execute(
-                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description)
-                       VALUES (?,?,'Customer',?,?,?,?,?,?)""",
+                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,'Customer',?,?,?,?,?,?,?)""",
                     (pend["txn_date"], pend["party_name"],
                      None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
-                     pend["qty"], pend["rate"], debit, credit, pend["desc"]))
+                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 conn.commit()
                 conn.close()
                 st.session_state.pop("cust_pending", None)
@@ -633,8 +781,9 @@ elif module == "💳 Party Daily Sale & Credit Entry":
     st.markdown("### 🕒 Last 10 Customer Entries")
     conn = get_db_connection()
     recent = pd.read_sql_query(
-        """SELECT id AS [Entry ID], txn_date AS Date, party_name AS Customer, item_type AS Fuel,
-                  qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
+        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit,
+                  description AS Description
            FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""", conn)
     conn.close()
     if not recent.empty:
@@ -654,6 +803,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
             txn_date = st.date_input("Date", date.today())
             vendor_name = st.selectbox("Vendor Name", vendors if vendors else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Direct Payment"])
+            voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
         with c2:
             qty = st.number_input("Qty Received (Ltrs)", min_value=0.0, value=0.0, step=1.0)
             rate = st.number_input("Purchase Rate", min_value=0.0, value=0.0, step=0.1)
@@ -663,7 +813,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
 
     if review_vend and vendor_name != "None":
         st.session_state["vend_pending"] = dict(
-            txn_date=str(txn_date), vendor_name=vendor_name, fuel=fuel,
+            txn_date=str(txn_date), vendor_name=vendor_name, fuel=fuel, voucher_no=voucher_no.strip(),
             qty=qty, rate=rate, paid=paid, desc=desc)
 
     pend = st.session_state.get("vend_pending")
@@ -672,8 +822,8 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         debit = pend["paid"]
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
-            "Date": pend["txn_date"], "Vendor": pend["vendor_name"], "Fuel": pend["fuel"],
-            "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
+            "Voucher No": pend["voucher_no"], "Date": pend["txn_date"], "Vendor": pend["vendor_name"],
+            "Fuel": pend["fuel"], "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
             "Purchase (Credit)": f"{credit:,.2f}", "Paid (Debit)": f"{debit:,.2f}",
             "Description": pend["desc"],
         }]))
@@ -688,11 +838,11 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
             else:
                 conn = get_db_connection()
                 conn.execute(
-                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description)
-                       VALUES (?,?,'Vendor',?,?,?,?,?,?)""",
+                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,'Vendor',?,?,?,?,?,?,?)""",
                     (pend["txn_date"], pend["vendor_name"],
                      None if pend["fuel"] == "Direct Payment" else pend["fuel"],
-                     pend["qty"], pend["rate"], debit, credit, pend["desc"]))
+                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 conn.commit()
                 conn.close()
                 st.session_state.pop("vend_pending", None)
@@ -702,8 +852,9 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
     st.markdown("### 🕒 Last 10 Vendor Entries")
     conn = get_db_connection()
     recent = pd.read_sql_query(
-        """SELECT id AS [Entry ID], txn_date AS Date, party_name AS Vendor, item_type AS Fuel,
-                  qty_ltrs AS Ltrs, rate AS Rate, debit AS [Paid], credit AS [Purchase], description AS Description
+        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate, debit AS [Paid], credit AS [Purchase],
+                  description AS Description
            FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""", conn)
     conn.close()
     if not recent.empty:
@@ -739,14 +890,14 @@ elif module == "✏️ Edit / Manage Entries":
         st.info("No entries found for this selection.")
     else:
         view = rows.rename(columns={
-            "id": "Entry ID", "txn_date": "Date", "party_name": "Party Name",
+            "id": "Entry ID", "voucher_no": "Voucher No", "txn_date": "Date", "party_name": "Party Name",
             "party_type": "Type", "item_type": "Fuel", "qty_ltrs": "Ltrs",
             "rate": "Rate", "debit": "Debit", "credit": "Credit", "description": "Description",
         }).drop(columns=[])
         st.dataframe(sr_index(view), use_container_width=True)
 
         labels = {
-            f"ID {r.id} | {r.txn_date} | {r.party_name} | {r.item_type or '-'} | "
+            f"ID {r.id} | {r.voucher_no or '-'} | {r.txn_date} | {r.party_name} | {r.item_type or '-'} | "
             f"Dr {r.debit:,.0f} / Cr {r.credit:,.0f}": int(r.id)
             for r in rows.itertuples()
         }
@@ -768,6 +919,7 @@ elif module == "✏️ Edit / Manage Entries":
                     fuel_options = ["Petrol", "Diesel", "None (Payment Only)"]
                     cur_fuel = rec["item_type"] if rec["item_type"] in ("Petrol", "Diesel") else "None (Payment Only)"
                     n_fuel = st.selectbox("Fuel Item", fuel_options, index=fuel_options.index(cur_fuel))
+                    n_voucher = st.text_input("Voucher No.", value=rec["voucher_no"] or "")
                 with e2:
                     n_qty = st.number_input("Ltrs", min_value=0.0, value=float(rec["qty_ltrs"]), step=1.0)
                     n_rate = st.number_input("Rate", min_value=0.0, value=float(rec["rate"]), step=0.1)
@@ -787,10 +939,10 @@ elif module == "✏️ Edit / Manage Entries":
                 conn = get_db_connection()
                 conn.execute(
                     """UPDATE ledger SET txn_date=?, party_name=?, item_type=?, qty_ltrs=?, rate=?,
-                              debit=?, credit=?, description=? WHERE id=?""",
+                              debit=?, credit=?, description=?, voucher_no=? WHERE id=?""",
                     (str(n_date), n_party,
                      None if n_fuel == "None (Payment Only)" else n_fuel,
-                     n_qty, n_rate, d_val, c_val, n_desc, entry_id))
+                     n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
                 conn.commit()
                 conn.close()
                 st.success(f"✅ Entry ID {entry_id} updated.")
@@ -969,11 +1121,12 @@ elif module == "💾 Backup & System Recovery":
 
             for l in data.get("ledger", []):
                 cur.execute(
-                    """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description)
-                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (l.get("id"), l.get("txn_date"), l.get("party_name"), l.get("party_type"),
                      l.get("item_type"), l.get("qty_ltrs", 0.0), l.get("rate", 0.0),
-                     l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", "")))
+                     l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
+                     l.get("voucher_no")))
 
             conn.commit()
             conn.close()
