@@ -319,6 +319,22 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
                            file_name=filename, mime="text/csv")
 
 
+def last_closing_stock(item_type: str) -> float:
+    """Fetch the FINAL closing stock (book closing stock adjusted by that day's
+    dip difference) from the most recent saved stock-register entry for this
+    fuel item. This is the correct value to carry forward as tomorrow's
+    Opening Stock — NOT the raw dip reading and NOT the book closing alone."""
+    conn = get_db_connection()
+    row = conn.execute(
+        """SELECT closing_stock, dip_diff FROM stock_register
+           WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
+        (item_type,)).fetchone()
+    conn.close()
+    if row is None:
+        return 0.0
+    return (row["closing_stock"] or 0.0) + (row["dip_diff"] or 0.0)
+
+
 def next_voucher_no() -> str:
     """Suggest the next voucher number as V-00001, V-00002 ... based on the highest
     numeric part already used (so it stays correct even after deletes)."""
@@ -588,14 +604,21 @@ elif module == "🛢️ Daily Stock Register":
 
     st.caption("Dip Difference = Actual Dip Stock − Book Closing Stock. "
                "Minus means shortage (stock kam), plus means excess (stock zyada). "
-               "The sign is kept and applied to the amount as well.")
+               "The **Final Closing Stock** (book closing adjusted by the dip difference) is what "
+               "carries forward as tomorrow's Opening Stock — it is auto-filled below.")
+
+    item_type = st.selectbox("Fuel Item (select first — Opening Stock auto-fills from this)",
+                             ["Petrol", "Diesel"], key="stock_item_type_pick")
+    suggested_opening = last_closing_stock(item_type)
+    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = last saved Final Closing Stock "
+               f"({suggested_opening:,.2f} Ltrs). You can still edit it below if needed.")
 
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
             e_date = st.date_input("Entry Date", date.today())
-            item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-            op_stock = st.number_input("Opening Stock (Ltrs)", min_value=0.0, value=0.0, step=1.0)
+            st.text_input("Fuel Item", value=item_type, disabled=True)
+            op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening), step=1.0)
             op_rate = st.number_input("Opening Rate", min_value=0.0, value=0.0, step=0.1)
         with c2:
             p_qty = st.number_input("Purchase Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
@@ -603,11 +626,15 @@ elif module == "🛢️ Daily Stock Register":
             s_qty = st.number_input("Sales Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
             s_rate = st.number_input("Sales Rate", min_value=0.0, value=0.0, step=0.1)
         with c3:
-            actual_stock = st.number_input("Actual Dip Stock (Ltrs)", min_value=0.0, value=0.0, step=1.0)
+            dip_checked = st.checkbox("Physical Dip Check done today?", value=True)
+            actual_stock = st.number_input(
+                "Actual Dip Stock (Ltrs)", value=0.0, step=1.0,
+                help="Litres actually found in the tank. Can be entered as a negative number "
+                     "too if you want to log a shortage adjustment directly.")
 
         review_stock = st.form_submit_button("👁️ Review Entry")
 
-    def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, actual_stock):
+    def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, actual_stock, dip_checked):
         op_amount = op_stock * op_rate
         p_amount = p_qty * p_rate
         tot_p_amount = op_amount + p_amount
@@ -616,25 +643,32 @@ elif module == "🛢️ Daily Stock Register":
         s_amount = s_qty * s_rate
         tot_s_amount = s_qty * avg_rate
         closing_amount = tot_p_amount - tot_s_amount
-        closing_stock = avail - s_qty
-        dip_diff = actual_stock - closing_stock          # signed: minus = shortage, plus = excess
-        dip_amount = dip_diff * avg_rate                 # same sign as dip_diff
+        closing_stock = avail - s_qty                    # book closing stock (before dip adjustment)
+        if dip_checked:
+            dip_diff = actual_stock - closing_stock       # signed: minus = shortage, plus = excess
+        else:
+            actual_stock = closing_stock                  # no dip taken -> no variance
+            dip_diff = 0.0
+        dip_amount = dip_diff * avg_rate                  # same sign as dip_diff
         act_amount = actual_stock * avg_rate
+        final_closing = closing_stock + dip_diff          # <-- carried forward as next day's Opening Stock
         return dict(op_amount=op_amount, p_amount=p_amount, tot_p_amount=tot_p_amount,
                     avail=avail, avg_rate=avg_rate, s_amount=s_amount, tot_s_amount=tot_s_amount,
                     closing_amount=closing_amount, closing_stock=closing_stock,
-                    dip_diff=dip_diff, dip_amount=dip_amount, act_amount=act_amount)
+                    dip_diff=dip_diff, dip_amount=dip_amount, act_amount=act_amount,
+                    actual_stock=actual_stock, final_closing=final_closing)
 
     if review_stock:
         st.session_state["stock_pending"] = dict(
             e_date=str(e_date), item_type=item_type, op_stock=op_stock, op_rate=op_rate,
-            p_qty=p_qty, p_rate=p_rate, s_qty=s_qty, s_rate=s_rate, actual_stock=actual_stock,
+            p_qty=p_qty, p_rate=p_rate, s_qty=s_qty, s_rate=s_rate,
+            actual_stock=actual_stock, dip_checked=dip_checked,
         )
 
     pend = st.session_state.get("stock_pending")
     if pend:
         k = stock_calc(pend["op_stock"], pend["op_rate"], pend["p_qty"], pend["p_rate"],
-                       pend["s_qty"], pend["s_rate"], pend["actual_stock"])
+                       pend["s_qty"], pend["s_rate"], pend["actual_stock"], pend["dip_checked"])
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         r1, r2, r3 = st.columns(3)
         r1.write(f"**Date:** {pend['e_date']}")
@@ -642,11 +676,14 @@ elif module == "🛢️ Daily Stock Register":
         r1.write(f"**Available Stock:** {k['avail']:,.2f} Ltrs")
         r2.write(f"**Average Rate:** Rs. {k['avg_rate']:,.4f}")
         r2.write(f"**Book Closing Stock:** {k['closing_stock']:,.2f} Ltrs")
-        r2.write(f"**Actual Dip Stock:** {pend['actual_stock']:,.2f} Ltrs")
+        r2.write(f"**Actual Dip Stock:** {k['actual_stock']:,.2f} Ltrs"
+                 + ("" if pend["dip_checked"] else " (no dip taken)"))
         sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
         r3.write(f"**Dip Difference:** {k['dip_diff']:+,.2f} Ltrs  → {sign}")
         r3.write(f"**Dip Diff Amount:** Rs. {k['dip_amount']:+,.2f}")
         r3.write(f"**Closing Amount:** Rs. {k['closing_amount']:,.2f}")
+        st.success(f"**✅ Final Closing Stock (→ tomorrow's Opening Stock for {pend['item_type']}): "
+                   f"{k['final_closing']:,.2f} Ltrs**")
 
         conn = get_db_connection()
         dup = conn.execute("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
@@ -678,7 +715,7 @@ elif module == "🛢️ Daily Stock Register":
                     (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
                      pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
                      k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
-                     k["closing_amount"], k["closing_stock"], k["dip_diff"], pend["actual_stock"], k["act_amount"]),
+                     k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
                 )
                 conn.commit()
                 conn.close()
@@ -694,7 +731,8 @@ elif module == "🛢️ Daily Stock Register":
                   purchase_rate AS [Purchase Rate], sales_qty AS [Sales Qty], sales_rate AS [Sales Rate],
                   avg_rate AS [Avg Rate], closing_stock AS [Closing Stock],
                   actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
-                  ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount]
+                  ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
+                  ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
            FROM stock_register ORDER BY entry_date DESC, id DESC""", conn)
     conn.close()
 
