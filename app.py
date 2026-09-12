@@ -6,7 +6,7 @@ from datetime import date
 import json
 
 # ==========================================
-# 1. PAGE CONFIGURATION & CUSTOM COLOR SCHEME
+# 1. PAGE CONFIGURATION & SOFT LIGHT THEME
 # ==========================================
 st.set_page_config(
     page_title="FD CNG Fuel Station",
@@ -15,85 +15,86 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom High-Contrast CSS Theme (Light Ice Blue, Navy Blue & Pure White Text)
+# Custom Soft Color Scheme (Light Ice Blue & Slate Accent)
 st.markdown("""
 <style>
-    /* Main Background */
+    /* Main App Background */
     .stApp {
-        background-color: #F1F5F9 !important;
+        background-color: #F8FAFC !important;
         color: #0F172A !important;
-        font-family: 'Inter', sans-serif;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
     
-    /* Sidebar Styling */
+    /* Soft Light Navigation Sidebar */
     section[data-testid="stSidebar"] {
-        background-color: #1E293B !important;
-        border-right: 2px solid #334155;
+        background-color: #E2E8F0 !important;
+        border-right: 1px solid #CBD5E1;
     }
     
-    /* Sidebar Text & Navigation Labels - Pure White */
+    /* Sidebar Text & Labels */
     section[data-testid="stSidebar"] *, 
     section[data-testid="stSidebar"] label, 
     section[data-testid="stSidebar"] span, 
     section[data-testid="stSidebar"] p {
-        color: #FFFFFF !important;
+        color: #1E293B !important;
         font-weight: 600 !important;
     }
     
-    /* Headers & Text High Contrast */
-    h1, h2, h3, h4, h5, h6, label, p, span {
+    /* Headers & High Contrast Titles */
+    h1, h2, h3, h4, h5, h6 {
         color: #0F172A !important;
+        font-weight: 700 !important;
     }
     
     /* Stat Cards Styling */
     .stat-card {
         background: #FFFFFF !important;
-        border: 2px solid #CBD5E1 !important;
-        border-radius: 10px !important;
-        padding: 18px !important;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-        margin-bottom: 12px !important;
+        border: 1px solid #E2E8F0 !important;
+        border-left: 5px solid #0284C7 !important;
+        border-radius: 8px !important;
+        padding: 16px !important;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+        margin-bottom: 10px !important;
     }
     .stat-title {
-        color: #475569 !important;
-        font-size: 0.85rem !important;
+        color: #64748B !important;
+        font-size: 0.8rem !important;
         font-weight: 700 !important;
         text-transform: uppercase !important;
     }
     .stat-value {
         color: #0F172A !important;
-        font-size: 1.8rem !important;
+        font-size: 1.6rem !important;
         font-weight: 800 !important;
     }
     
     /* Section Headers */
     .section-header {
-        border-left: 6px solid #0284C7 !important;
-        padding-left: 12px !important;
-        margin-bottom: 20px !important;
+        border-left: 5px solid #0284C7 !important;
+        padding-left: 10px !important;
+        margin-bottom: 18px !important;
         font-weight: 800 !important;
         color: #0F172A !important;
-        font-size: 1.5rem !important;
+        font-size: 1.4rem !important;
     }
     
-    /* Buttons */
+    /* Action Buttons */
     .stButton>button {
         background-color: #0284C7 !important;
         color: #FFFFFF !important;
         border-radius: 6px !important;
         border: none !important;
         font-weight: 700 !important;
-        padding: 8px 18px !important;
     }
     .stButton>button:hover {
         background-color: #0369A1 !important;
     }
     
-    /* Dataframes */
+    /* Table & DataFrame Custom Styling */
     div[data-testid="stDataFrame"] {
         background-color: #FFFFFF !important;
         border: 1px solid #CBD5E1 !important;
-        border-radius: 8px !important;
+        border-radius: 6px !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -109,16 +110,16 @@ def login_screen():
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.markdown("""
-        <div style='background-color:#FFFFFF; padding:30px; border-radius:12px; border:2px solid #CBD5E1; text-align:center;'>
+        <div style='background-color:#FFFFFF; padding:28px; border-radius:10px; border:1px solid #CBD5E1; text-align:center;'>
             <h2 style='color:#0F172A;'>⛽ FD CNG Fuel Station</h2>
-            <p style='color:#64748B;'>Please enter login credentials to access management app.</p>
+            <p style='color:#64748B;'>Please sign in to access management dashboard.</p>
         </div>
         """, unsafe_allow_html=True)
         
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submit_login = st.form_submit_button("🔑 Login to Portal", use_container_width=True)
+            submit_login = st.form_submit_button("🔑 Login", use_container_width=True)
             
             if submit_login:
                 if username == "Fdcngpump" and password == "Fazal661112@":
@@ -145,7 +146,6 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Master Parties Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS parties (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,7 +156,6 @@ def init_db():
     )
     """)
     
-    # Daily Stock Register Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS stock_register (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,7 +182,6 @@ def init_db():
     )
     """)
     
-    # Master Ledger Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -200,7 +198,6 @@ def init_db():
     )
     """)
     
-    # Seed Customers & Vendors List
     cursor.execute("SELECT COUNT(*) FROM parties")
     if cursor.fetchone()[0] == 0:
         default_parties = [
@@ -212,6 +209,14 @@ def init_db():
             ('Fatima Mill', 'Customer', 0.0, ''),
             ('Ravi Rice', 'Customer', 0.0, ''),
             ('R.J 39D', 'Customer', 0.0, ''),
+            ('Malika Rice', 'Customer', 0.0, ''),
+            ('Cadet College', 'Customer', 0.0, ''),
+            ('26/d Form', 'Customer', 0.0, ''),
+            ('Ravi Trader(Atiq Sb)', 'Customer', 0.0, ''),
+            ('AK Trader', 'Customer', 0.0, ''),
+            ('Siddique Zarai Form', 'Customer', 0.0, ''),
+            ('Zia ur Rehman', 'Customer', 0.0, ''),
+            ('Arshad Protein', 'Customer', 0.0, ''),
             ('Zoom Petroleum', 'Vendor', 0.0, ''),
             ('Mohaib(Sharoz)', 'Vendor', 0.0, ''),
             ('Pervaiz Petroleum', 'Vendor', 0.0, ''),
@@ -225,7 +230,6 @@ def init_db():
 
 init_db()
 
-# Helper Query Functions
 def fetch_parties(p_type=None):
     conn = get_db_connection()
     if p_type:
@@ -264,39 +268,17 @@ def calculate_party_balances(party_type):
         })
     return pd.DataFrame(result)
 
-def get_running_statement(party_name, party_type):
-    conn = get_db_connection()
-    party_info = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party_name,)).fetchone()
-    op_bal = party_info['opening_balance'] if party_info else 0.0
-    
-    df = pd.read_sql_query(
-        "SELECT id, txn_date as Date, item_type as Fuel, qty_ltrs as Ltrs, rate as Rate, debit as Debit, credit as Credit, description as Description FROM ledger WHERE party_name = ? ORDER BY txn_date ASC, id ASC",
-        conn, params=(party_name,)
-    )
-    conn.close()
-    
-    running_balance = op_bal
-    balances = []
-    for _, row in df.iterrows():
-        if party_type == 'Customer':
-            running_balance += (row['Debit'] - row['Credit'])
-        else:
-            running_balance += (row['Credit'] - row['Debit'])
-        balances.append(running_balance)
-        
-    df['Running Balance'] = balances
-    return op_bal, df
-
 # ==========================================
 # 4. SIDEBAR NAVIGATION
 # ==========================================
-st.sidebar.markdown("## ⛽ FD CNG Fuel Station")
+st.sidebar.markdown("## ⛽ FD CNG Station")
 st.sidebar.markdown("---")
 
 module = st.sidebar.radio(
     "Navigation Menu",
     [
         "📊 Dashboard & Monthly Analytics",
+        "📅 Daily Credit Sale & Day Totals",
         "📄 Customer/Vendor Statements & Print",
         "🛢️ Daily Stock Register",
         "💳 Party Daily Sale & Credit Entry",
@@ -313,10 +295,10 @@ if st.sidebar.button("🚪 Logout"):
     st.rerun()
 
 # ==========================================
-# MODULE 1: DASHBOARD
+# MODULE 1: DASHBOARD & MULTI-MONTH MATRIX
 # ==========================================
 if module == "📊 Dashboard & Monthly Analytics":
-    st.markdown("<div class='section-header'>Dashboard & Monthly Breakdown</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Dashboard & Multi-Month Party Sales Matrix</div>", unsafe_allow_html=True)
     
     cust_df = calculate_party_balances('Customer')
     vend_df = calculate_party_balances('Vendor')
@@ -342,36 +324,64 @@ if module == "📊 Dashboard & Monthly Analytics":
         st.markdown(f"<div class='stat-card'><div class='stat-title'>Total Diesel Sold</div><div class='stat-value'>{diesel_ltrs:,.2f} Ltrs</div></div>", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("### 🗓️ Monthly Breakdown (Petrol & Diesel Wise)")
+    st.markdown("### 📊 Multi-Month Party Sales Summary (Excel Dashboard View)")
     
     conn = get_db_connection()
-    monthly_query = """
-    SELECT strftime('%Y-%m', txn_date) as Month, party_type as Type, party_name as Party, item_type as Fuel, SUM(qty_ltrs) as Total_Ltrs, SUM(debit + credit) as Total_Amount
-    FROM ledger WHERE item_type IN ('Petrol', 'Diesel') GROUP BY Month, party_type, party_name, item_type ORDER BY Month DESC, Party ASC
+    query = """
+    SELECT party_name, strftime('%Y-%m', txn_date) as month, item_type, SUM(debit) as total_amount
+    FROM ledger
+    WHERE party_type = 'Customer' AND item_type IN ('Petrol', 'Diesel')
+    GROUP BY party_name, month, item_type
     """
-    m_df = pd.read_sql_query(monthly_query, conn)
+    matrix_df = pd.read_sql_query(query, conn)
     conn.close()
 
-    tab1, tab2 = st.tabs(["👥 Customer Monthly Summary", "🏢 Vendor Monthly Summary"])
-    
-    with tab1:
-        cust_m = m_df[m_df['Type'] == 'Customer']
-        if not cust_m.empty:
-            pivot_cust = cust_m.pivot_table(index=['Month', 'Party'], columns='Fuel', values=['Total_Ltrs', 'Total_Amount'], aggfunc='sum', fill_value=0)
-            st.dataframe(pivot_cust, use_container_width=True)
-        else:
-            st.info("No customer transaction records found.")
-
-    with tab2:
-        vend_m = m_df[m_df['Type'] == 'Vendor']
-        if not vend_m.empty:
-            pivot_vend = vend_m.pivot_table(index=['Month', 'Party'], columns='Fuel', values=['Total_Ltrs', 'Total_Amount'], aggfunc='sum', fill_value=0)
-            st.dataframe(pivot_vend, use_container_width=True)
-        else:
-            st.info("No vendor transaction records found.")
+    if not matrix_df.empty:
+        pivoted = matrix_df.pivot_table(
+            index="party_name", 
+            columns=["month", "item_type"], 
+            values="total_amount", 
+            aggfunc="sum", 
+            fill_value=0
+        )
+        st.dataframe(pivoted, use_container_width=True)
+    else:
+        st.info("No party sales transactions recorded yet.")
 
 # ==========================================
-# MODULE 2: PARTY STATEMENT & DIRECT PRINT
+# MODULE 2: DAILY CREDIT SALE REPORT WITH DAY TOTALS
+# ==========================================
+elif module == "📅 Daily Credit Sale & Day Totals":
+    st.markdown("<div class='section-header'>Daily Credit Sale Report (Day-Wise Breakdown)</div>", unsafe_allow_html=True)
+    
+    selected_month = st.text_input("Filter Month (YYYY-MM Format e.g., 2026-08)", value=date.today().strftime('%Y-%m'))
+    
+    conn = get_db_connection()
+    query = f"""
+    SELECT txn_date as Date, party_name as [Party Name],
+           SUM(CASE WHEN item_type = 'Petrol' THEN debit ELSE 0 END) as Petrol,
+           SUM(CASE WHEN item_type = 'Diesel' THEN debit ELSE 0 END) as Diesel,
+           SUM(credit) as [Payment Received],
+           SUM(debit) as [Credit Total (Petrol+Diesel)]
+    FROM ledger
+    WHERE party_type = 'Customer' AND strftime('%Y-%m', txn_date) = '{selected_month}'
+    GROUP BY txn_date, party_name
+    ORDER BY txn_date ASC, id ASC
+    """
+    daily_df = pd.read_sql_query(query, conn)
+    conn.close()
+    
+    if not daily_df.empty:
+        st.dataframe(daily_df, use_container_width=True)
+        
+        st.markdown("### 📈 Day-Wise Totals Summary")
+        day_totals = daily_df.groupby("Date")[["Petrol", "Diesel", "Credit Total (Petrol+Diesel)"]].sum().reset_index()
+        st.dataframe(day_totals, use_container_width=True)
+    else:
+        st.info(f"No daily entries found for month {selected_month}.")
+
+# ==========================================
+# MODULE 3: PARTY STATEMENT & DIRECT PRINT
 # ==========================================
 elif module == "📄 Customer/Vendor Statements & Print":
     st.markdown("<div class='section-header'>Party Statement & Printable Ledger</div>", unsafe_allow_html=True)
@@ -384,69 +394,32 @@ elif module == "📄 Customer/Vendor Statements & Print":
         selected_party = st.selectbox("Select Party Name", parties_list if parties_list else ["None"])
 
     if selected_party and selected_party != "None":
-        op_bal, stmt_df = get_running_statement(selected_party, p_type)
+        conn = get_db_connection()
+        party_info = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (selected_party,)).fetchone()
+        op_bal = party_info['opening_balance'] if party_info else 0.0
         
-        st.markdown(f"#### Statement Statement Header")
-        st.info(f"**Party Name:** {selected_party} | **Type:** {p_type} | **Opening Balance:** Rs. {op_bal:,.2f}")
+        stmt_df = pd.read_sql_query(
+            "SELECT id, txn_date as Date, item_type as Fuel, qty_ltrs as Ltrs, rate as Rate, debit as Debit, credit as Credit, description as Description FROM ledger WHERE party_name = ? ORDER BY txn_date ASC, id ASC",
+            conn, params=(selected_party,)
+        )
+        conn.close()
         
+        running_bal = op_bal
+        balances = []
+        for _, row in stmt_df.iterrows():
+            if p_type == 'Customer':
+                running_bal += (row['Debit'] - row['Credit'])
+            else:
+                running_bal += (row['Credit'] - row['Debit'])
+            balances.append(running_bal)
+            
+        stmt_df['Running Balance'] = balances
+        
+        st.info(f"**Party:** {selected_party} | **Type:** {p_type} | **Opening Balance:** Rs. {op_bal:,.2f}")
         st.dataframe(stmt_df, use_container_width=True)
-        
-        # Direct Print Logic
-        print_html = f"""
-        <html>
-        <head>
-        <title>FD CNG Fuel Station - Statement</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; }}
-            h2 {{ text-align: center; margin-bottom: 5px; }}
-            p {{ text-align: center; margin-top: 0px; font-size: 14px; }}
-            .header-table {{ width: 100%; margin-bottom: 20px; border-collapse: collapse; }}
-            .header-table td {{ padding: 5px; font-weight: bold; }}
-            .data-table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-            .data-table th, .data-table td {{ border: 1px solid #333; padding: 8px; text-align: left; font-size: 13px; }}
-            .data-table th {{ background-color: #f2f2f2; }}
-        </style>
-        </head>
-        <body>
-            <h2>FD CNG FUEL STATION</h2>
-            <p>Account Ledger Statement</p>
-            <hr>
-            <table class="header-table">
-                <tr>
-                    <td>Party Name: {selected_party}</td>
-                    <td>Party Type: {p_type}</td>
-                </tr>
-                <tr>
-                    <td>Opening Balance: Rs. {op_bal:,.2f}</td>
-                    <td>Statement Date: {date.today().strftime('%Y-%m-%d')}</td>
-                </tr>
-            </table>
-            {stmt_df.to_html(index=False, classes='data-table')}
-            <script>
-                window.onload = function() {{ window.print(); }}
-            </script>
-        </body>
-        </html>
-        """
-        
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            st.download_button(
-                label="🖨️ Direct Print / Save PDF",
-                data=print_html,
-                file_name=f"Statement_{selected_party}_{date.today()}.html",
-                mime="text/html"
-            )
-        with col_btn2:
-            st.download_button(
-                label="📥 Export Excel CSV",
-                data=stmt_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"Statement_{selected_party}_{date.today()}.csv",
-                mime="text/csv"
-            )
 
 # ==========================================
-# MODULE 3: DAILY STOCK REGISTER
+# MODULE 4: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     st.markdown("<div class='section-header'>Daily Stock Register</div>", unsafe_allow_html=True)
@@ -456,15 +429,15 @@ elif module == "🛢️ Daily Stock Register":
         with c1:
             e_date = st.date_input("Entry Date", date.today())
             item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-            op_stock = st.number_input("Opening Stock (Ltrs)", min_value=0.0, step=1.0, value=None)
-            op_rate = st.number_input("Opening Rate", min_value=0.0, step=0.01, value=None)
+            op_stock = st.number_input("Opening Stock (Ltrs)", min_value=0.0, value=None)
+            op_rate = st.number_input("Opening Rate", min_value=0.0, value=None)
         with c2:
-            p_qty = st.number_input("Purchase Qty (Ltrs)", min_value=0.0, step=1.0, value=None)
-            p_rate = st.number_input("Purchase Rate", min_value=0.0, step=0.01, value=None)
-            s_qty = st.number_input("Sales Qty (Ltrs)", min_value=0.0, step=1.0, value=None)
-            s_rate = st.number_input("Sales Rate", min_value=0.0, step=0.01, value=None)
+            p_qty = st.number_input("Purchase Qty (Ltrs)", min_value=0.0, value=None)
+            p_rate = st.number_input("Purchase Rate", min_value=0.0, value=None)
+            s_qty = st.number_input("Sales Qty (Ltrs)", min_value=0.0, value=None)
+            s_rate = st.number_input("Sales Rate", min_value=0.0, value=None)
         with c3:
-            actual_stock = st.number_input("Actual Dip Stock (Ltrs)", min_value=0.0, step=1.0, value=None)
+            actual_stock = st.number_input("Actual Dip Stock (Ltrs)", min_value=0.0, value=None)
 
         submit_stock = st.form_submit_button("💾 Save Daily Stock Entry")
 
@@ -506,14 +479,14 @@ elif module == "🛢️ Daily Stock Register":
         conn.close()
         st.success("Daily stock record updated!")
 
-    st.markdown("### 📊 Existing Stock Records Log")
+    st.markdown("### 📊 Existing Stock Records")
     conn = get_db_connection()
     stock_df = pd.read_sql_query("SELECT * FROM stock_register ORDER BY entry_date DESC, id DESC", conn)
     conn.close()
     st.dataframe(stock_df, use_container_width=True)
 
 # ==========================================
-# MODULE 4: PARTY DAILY SALE
+# MODULE 5: PARTY DAILY SALE ENTRY
 # ==========================================
 elif module == "💳 Party Daily Sale & Credit Entry":
     st.markdown("<div class='section-header'>Customer Credit Sale & Voucher Entry</div>", unsafe_allow_html=True)
@@ -527,9 +500,9 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             party_name = st.selectbox("Customer Name", customers if customers else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Cash Payment/Voucher"])
         with c2:
-            qty = st.number_input("Qty (Ltrs)", min_value=0.0, step=1.0, value=None)
-            rate = st.number_input("Rate", min_value=0.0, step=0.01, value=None)
-            payment = st.number_input("Amount Received/Credit (Rs.)", min_value=0.0, step=100.0, value=None)
+            qty = st.number_input("Qty (Ltrs)", min_value=0.0, value=None)
+            rate = st.number_input("Rate", min_value=0.0, value=None)
+            payment = st.number_input("Amount Received/Credit (Rs.)", min_value=0.0, value=None)
             desc = st.text_input("Description / Slip No.")
             
         submit_credit = st.form_submit_button("💾 Save Customer Transaction")
@@ -549,10 +522,10 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         """, (str(txn_date), party_name, fuel if fuel != "Cash Payment/Voucher" else None, v_qty, v_rate, debit, credit, desc))
         conn.commit()
         conn.close()
-        st.success("Customer transaction recorded successfully!")
+        st.success("Customer transaction saved!")
 
 # ==========================================
-# MODULE 5: VENDOR PURCHASING
+# MODULE 6: VENDOR PURCHASING
 # ==========================================
 elif module == "🚛 Vendor Purchasing & Dip Stock":
     st.markdown("<div class='section-header'>Vendor Purchasing & Payments</div>", unsafe_allow_html=True)
@@ -566,9 +539,9 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
             vendor_name = st.selectbox("Vendor Name", vendors if vendors else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Direct Payment"])
         with c2:
-            qty = st.number_input("Qty Received (Ltrs)", min_value=0.0, step=1.0, value=None)
-            rate = st.number_input("Purchase Rate", min_value=0.0, step=0.01, value=None)
-            paid_amount = st.number_input("Payment Paid to Vendor (Rs.)", min_value=0.0, step=100.0, value=None)
+            qty = st.number_input("Qty Received (Ltrs)", min_value=0.0, value=None)
+            rate = st.number_input("Purchase Rate", min_value=0.0, value=None)
+            paid_amount = st.number_input("Payment Paid to Vendor (Rs.)", min_value=0.0, value=None)
             desc = st.text_input("Invoice / Tanker No.")
             
         submit_vendor = st.form_submit_button("💾 Save Vendor Transaction")
@@ -588,19 +561,17 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         """, (str(txn_date), vendor_name, fuel if fuel != "Direct Payment" else None, v_qty, v_rate, debit, credit, desc))
         conn.commit()
         conn.close()
-        st.success("Vendor purchase transaction recorded!")
+        st.success("Vendor transaction saved!")
 
 # ==========================================
-# MODULE 6: EDIT / MANAGE ENTRIES
+# MODULE 7: EDIT / MANAGE ENTRIES
 # ==========================================
 elif module == "✏️ Edit / Manage Entries":
-    st.markdown("<div class='section-header'>Editable Ledger & Record Management</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Editable Ledger Entries</div>", unsafe_allow_html=True)
     
     conn = get_db_connection()
     df_ledger = pd.read_sql_query("SELECT * FROM ledger ORDER BY txn_date DESC, id DESC", conn)
     conn.close()
-    
-    st.caption("Aap neeche kisi bhi row par double click karke uski entries directly update kar sakte hain.")
     
     edited_df = st.data_editor(df_ledger, num_rows="dynamic", use_container_width=True, key="ledger_editor")
     
@@ -616,13 +587,13 @@ elif module == "✏️ Edit / Manage Entries":
                 """, (row['id'], str(row['txn_date']), row['party_name'], row['party_type'], row['item_type'], row['qty_ltrs'], row['rate'], row['debit'], row['credit'], row['description']))
         conn.commit()
         conn.close()
-        st.success("All ledger updates saved!")
+        st.success("Ledger records updated!")
 
 # ==========================================
-# MODULE 7: RECONCILIATION
+# MODULE 8: RECONCILIATION
 # ==========================================
 elif module == "⚖️ Stock vs Sale Month-End Match":
-    st.markdown("<div class='section-header'>Stock & Sales Month-End Reconciliation</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Stock vs Sales Reconciliation</div>", unsafe_allow_html=True)
     
     conn = get_db_connection()
     stock_summary = pd.read_sql_query("""
@@ -642,7 +613,7 @@ elif module == "⚖️ Stock vs Sale Month-End Match":
     st.dataframe(reconcil, use_container_width=True)
 
 # ==========================================
-# MODULE 8: MASTER SETUP (ADD / REMOVE PARTIES)
+# MODULE 9: MASTER SETUP (ADD / REMOVE PARTIES)
 # ==========================================
 elif module == "⚙️ Master Setup (Parties/Vendors)":
     st.markdown("<div class='section-header'>Master Parties Setup & Management</div>", unsafe_allow_html=True)
@@ -688,7 +659,7 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
     st.dataframe(fetch_parties(), use_container_width=True)
 
 # ==========================================
-# MODULE 9: BACKUP & RECOVERY
+# MODULE 10: BACKUP & RECOVERY
 # ==========================================
 elif module == "💾 Backup & System Recovery":
     st.markdown("<div class='section-header'>Database Backup & System Recovery</div>", unsafe_allow_html=True)
@@ -708,7 +679,7 @@ elif module == "💾 Backup & System Recovery":
     json_backup = json.dumps(backup_dict, indent=4)
     
     st.download_button(
-        label="💾 Download Full JSON Backup File",
+        label="💾 Download JSON Backup File",
         data=json_backup,
         file_name=f"FD_CNG_Backup_{date.today()}.json",
         mime="application/json"
