@@ -3,10 +3,9 @@ import pandas as pd
 import sqlite3
 import datetime
 from datetime import date
-import io
 
 # ==========================================
-# PAGE CONFIGURATION & MODERN SAAS THEME
+# PAGE CONFIGURATION & HIGH-CONTRAST SAAS THEME
 # ==========================================
 st.set_page_config(
     page_title="Fazal Din Fuel Station - Management Portal",
@@ -15,79 +14,99 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom Modern SaaS CSS (PETRO Theme Style)
+# Custom High-Contrast Professional SaaS CSS
 st.markdown("""
 <style>
-    /* Global Styles */
+    /* Global Background & Base Text */
     .stApp {
-        background-color: #0F172A;
-        color: #F8FAFC;
+        background-color: #F8FAFC !important;
+        color: #0F172A !important;
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
     }
     
-    /* Sidebar Styling */
+    /* Sidebar Customization */
     section[data-testid="stSidebar"] {
-        background-color: #1E293B !important;
-        border-right: 1px solid #334155;
+        background-color: #0F172A !important;
+        border-right: 2px solid #CBD5E1;
+    }
+    section[data-testid="stSidebar"] * {
+        color: #F8FAFC !important;
     }
     
-    /* Card Component Styling */
+    /* Typography Overrides */
+    h1, h2, h3, h4, h5, h6, label, p, span {
+        color: #0F172A !important;
+    }
+    
+    /* Card Component Styling with High Visibility */
     .stat-card {
-        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 20px;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-        margin-bottom: 15px;
+        background: #FFFFFF !important;
+        border: 2px solid #E2E8F0 !important;
+        border-radius: 12px !important;
+        padding: 20px !important;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04) !important;
+        margin-bottom: 15px !important;
     }
     .stat-title {
-        color: #94A3B8;
-        font-size: 0.85rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
+        color: #475569 !important;
+        font-size: 0.85rem !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.05em !important;
     }
     .stat-value {
-        color: #F8FAFC;
-        font-size: 1.8rem;
-        font-weight: 700;
-        margin-top: 5px;
+        color: #0F172A !important;
+        font-size: 1.9rem !important;
+        font-weight: 800 !important;
+        margin-top: 6px !important;
     }
     .stat-sub {
-        color: #38BDF8;
-        font-size: 0.8rem;
-        margin-top: 5px;
-    }
-    
-    /* Table & Dataframe Styling */
-    div[data-testid="stDataFrame"] {
-        border: 1px solid #334155;
-        border-radius: 8px;
-        overflow: hidden;
-    }
-    
-    /* Custom Buttons */
-    .stButton>button {
-        background-color: #2563EB;
-        color: white;
-        border-radius: 8px;
-        border: none;
-        font-weight: 600;
-        padding: 8px 16px;
-        transition: all 0.2s ease;
-    }
-    .stButton>button:hover {
-        background-color: #1D4ED8;
-        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+        color: #0284C7 !important;
+        font-size: 0.85rem !important;
+        font-weight: 600 !important;
+        margin-top: 4px !important;
     }
     
     /* Section Headers */
     .section-header {
-        border-left: 4px solid #38BDF8;
-        padding-left: 12px;
-        margin-bottom: 20px;
-        font-weight: 700;
-        color: #F8FAFC;
+        border-left: 5px solid #0284C7 !important;
+        padding-left: 14px !important;
+        margin-bottom: 22px !important;
+        font-weight: 800 !important;
+        color: #0F172A !important;
+        font-size: 1.6rem !important;
+    }
+    
+    /* Input Fields & Form High Contrast */
+    input, select, textarea, div[role="combobox"] {
+        background-color: #FFFFFF !important;
+        color: #0F172A !important;
+        border: 1px solid #94A3B8 !important;
+        border-radius: 6px !important;
+        font-weight: 500 !important;
+    }
+    
+    /* Buttons Styling */
+    .stButton>button {
+        background-color: #0284C7 !important;
+        color: #FFFFFF !important;
+        border-radius: 8px !important;
+        border: none !important;
+        font-weight: 700 !important;
+        padding: 10px 20px !important;
+        box-shadow: 0 2px 4px rgba(2, 132, 199, 0.2) !important;
+    }
+    .stButton>button:hover {
+        background-color: #0369A1 !important;
+        color: #FFFFFF !important;
+    }
+    
+    /* DataFrame/Tables Styling */
+    div[data-testid="stDataFrame"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #CBD5E1 !important;
+        border-radius: 8px !important;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -117,7 +136,7 @@ def init_db():
     )
     """)
     
-    # Stock Register Table (Matching Image 1 Excel Structure)
+    # Stock Register Table
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS stock_register (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -144,7 +163,7 @@ def init_db():
     )
     """)
     
-    # Transactions Ledger (Credit Sales, Purchases, Vouchers)
+    # Transactions Ledger
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS ledger (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -161,7 +180,7 @@ def init_db():
     )
     """)
     
-    # Seed default parties if empty
+    # Seed default parties
     cursor.execute("SELECT COUNT(*) FROM parties")
     if cursor.fetchone()[0] == 0:
         default_parties = [
@@ -187,7 +206,7 @@ def init_db():
 init_db()
 
 # ==========================================
-# HELPER FUNCTIONS & CALCULATIONS
+# HELPER FUNCTIONS
 # ==========================================
 def fetch_parties(p_type=None):
     conn = get_db_connection()
@@ -252,9 +271,9 @@ def get_running_statement(party_name, party_type):
     return op_bal, df
 
 # ==========================================
-# NAVIGATION / SIDEBAR MODULES
+# SIDEBAR NAVIGATION
 # ==========================================
-st.sidebar.markdown("### ⛽ PETRO Enterprise")
+st.sidebar.markdown("## ⛽ PETRO Enterprise")
 st.sidebar.markdown("**Fazal Din Fuel Station**")
 st.sidebar.markdown("---")
 
@@ -273,10 +292,10 @@ module = st.sidebar.radio(
 )
 
 # ==========================================
-# MODULE 1: DASHBOARD & MONTHLY ANALYTICS
+# MODULE 1: DASHBOARD
 # ==========================================
 if module == "📊 Dashboard & Monthly Analytics":
-    st.markdown("<h2 class='section-header'>Enterprise Dashboard & Monthly Breakdown</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Enterprise Dashboard & Monthly Breakdown</div>", unsafe_allow_html=True)
     
     cust_df = calculate_party_balances('Customer')
     vend_df = calculate_party_balances('Vendor')
@@ -284,7 +303,6 @@ if module == "📊 Dashboard & Monthly Analytics":
     tot_receivables = cust_df['Net Balance'].sum()
     tot_payables = vend_df['Net Balance'].sum()
     
-    # Fetch total fuel volumes
     conn = get_db_connection()
     fuel_summary = pd.read_sql_query(
         "SELECT item_type, SUM(qty_ltrs) as total_ltrs FROM ledger WHERE item_type IS NOT NULL GROUP BY item_type", conn
@@ -328,7 +346,7 @@ if module == "📊 Dashboard & Monthly Analytics":
         </div>
         """, unsafe_allow_html=True)
 
-    st.markdown("---")
+    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("### 🗓️ Monthly Breakdown (Petrol & Diesel Wise)")
     
     conn = get_db_connection()
@@ -381,10 +399,10 @@ if module == "📊 Dashboard & Monthly Analytics":
             st.info("No monthly vendor data found.")
 
 # ==========================================
-# MODULE 2: STATEMENTS & PRINT
+# MODULE 2: STATEMENTS
 # ==========================================
 elif module == "📄 Customer/Vendor Statements & Print":
-    st.markdown("<h2 class='section-header'>Party Statement & Printable Ledger</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Party Statement & Printable Ledger</div>", unsafe_allow_html=True)
     
     col1, col2 = st.columns(2)
     with col1:
@@ -401,7 +419,6 @@ elif module == "📄 Customer/Vendor Statements & Print":
         
         st.dataframe(stmt_df, use_container_width=True)
         
-        # Download Printable Statement Options
         csv_data = stmt_df.to_csv(index=False).encode('utf-8')
         
         st.download_button(
@@ -412,11 +429,10 @@ elif module == "📄 Customer/Vendor Statements & Print":
         )
 
 # ==========================================
-# MODULE 3: DAILY STOCK REGISTER (IMAGE 1 EXCEL)
+# MODULE 3: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register (Excel Sheet)":
-    st.markdown("<h2 class='section-header'>Daily Stock Register & Inventory Log</h2>", unsafe_allow_html=True)
-    st.info("Exact replication of physical Excel register: Track Opening, Purchases, Rates, Sales, Closing & Dip Differences.")
+    st.markdown("<div class='section-header'>Daily Stock Register & Inventory Log</div>", unsafe_allow_html=True)
 
     with st.form("stock_form"):
         c1, c2, c3 = st.columns(3)
@@ -472,10 +488,10 @@ elif module == "🛢️ Daily Stock Register (Excel Sheet)":
     st.dataframe(stock_df, use_container_width=True)
 
 # ==========================================
-# MODULE 4: PARTY DAILY SALE & CREDIT
+# MODULE 4: PARTY DAILY SALE
 # ==========================================
 elif module == "💳 Party Daily Sale & Credit Entry":
-    st.markdown("<h2 class='section-header'>Customer Credit Sale & Voucher Entry</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Customer Credit Sale & Voucher Entry</div>", unsafe_allow_html=True)
     
     customers = fetch_parties('Customer')['name'].tolist()
     
@@ -510,7 +526,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
 # MODULE 5: VENDOR PURCHASING
 # ==========================================
 elif module == "🚛 Vendor Purchasing & Dip Stock":
-    st.markdown("<h2 class='section-header'>Vendor Purchasing & Payments</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Vendor Purchasing & Payments</div>", unsafe_allow_html=True)
     
     vendors = fetch_parties('Vendor')['name'].tolist()
     
@@ -545,7 +561,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
 # MODULE 6: EDIT / MANAGE ENTRIES
 # ==========================================
 elif module == "✏️ Edit / Manage Entries":
-    st.markdown("<h2 class='section-header'>Editable Ledger & Record Management</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Editable Ledger & Record Management</div>", unsafe_allow_html=True)
     
     conn = get_db_connection()
     df_ledger = pd.read_sql_query("SELECT * FROM ledger ORDER BY id DESC", conn)
@@ -560,7 +576,6 @@ elif module == "✏️ Edit / Manage Entries":
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Simple sync mechanism: clear and replace
         cursor.execute("DELETE FROM ledger")
         for _, row in edited_df.iterrows():
             if pd.notna(row['party_name']) and row['party_name'] != '':
@@ -573,10 +588,10 @@ elif module == "✏️ Edit / Manage Entries":
         st.success("Ledger records updated successfully!")
 
 # ==========================================
-# MODULE 7: STOCK VS SALE RECONCILIATION
+# MODULE 7: RECONCILIATION
 # ==========================================
 elif module == "⚖️ Stock vs Sale Month-End Match":
-    st.markdown("<h2 class='section-header'>Stock & Sales Month-End Reconciliation</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Stock & Sales Month-End Reconciliation</div>", unsafe_allow_html=True)
     
     conn = get_db_connection()
     stock_summary = pd.read_sql_query("""
@@ -605,18 +620,12 @@ elif module == "⚖️ Stock vs Sale Month-End Match":
     reconcil['Sales Match Variance'] = reconcil['total_stock_sales'] - reconcil['total_ledger_sales']
     
     st.dataframe(reconcil, use_container_width=True)
-    
-    for _, r in reconcil.iterrows():
-        if abs(r['Sales Match Variance']) < 0.01:
-            st.success(f"✅ {r['item_type']}: Stock register sales match perfectly with customer ledger entries!")
-        else:
-            st.warning(f"⚠️ {r['item_type']}: Mismatch detected! Difference of {r['Sales Match Variance']} Ltrs between Stock register & Customer credit sales.")
 
 # ==========================================
 # MODULE 8: MASTER SETUP
 # ==========================================
 elif module == "⚙️ Master Setup (Parties/Vendors)":
-    st.markdown("<h2 class='section-header'>Master Parties & Setup</h2>", unsafe_allow_html=True)
+    st.markdown("<div class='section-header'>Master Parties & Setup</div>", unsafe_allow_html=True)
     
     with st.form("add_party_form"):
         c1, c2 = st.columns(2)
