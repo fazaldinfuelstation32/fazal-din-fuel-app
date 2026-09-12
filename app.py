@@ -602,10 +602,10 @@ elif module == "📄 Customer/Vendor Statements & Print":
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
 
-    st.caption("Dip Difference = Actual Dip Stock − Book Closing Stock. "
-               "Minus means shortage (stock kam), plus means excess (stock zyada). "
-               "The **Final Closing Stock** (book closing adjusted by the dip difference) is what "
-               "carries forward as tomorrow's Opening Stock — it is auto-filled below.")
+    st.caption("Dip Difference = the shortage/excess amount YOU enter directly during the physical "
+               "dip check (not the full tank reading). Minus means shortage (stock kam), plus means "
+               "excess (stock zyada). The **Final Closing Stock** (book closing adjusted by that "
+               "difference) is what carries forward as tomorrow's Opening Stock — auto-filled below.")
 
     item_type = st.selectbox("Fuel Item (select first — Opening Stock auto-fills from this)",
                              ["Petrol", "Diesel"], key="stock_item_type_pick")
@@ -627,14 +627,15 @@ elif module == "🛢️ Daily Stock Register":
             s_rate = st.number_input("Sales Rate", min_value=0.0, value=0.0, step=0.1)
         with c3:
             dip_checked = st.checkbox("Physical Dip Check done today?", value=True)
-            actual_stock = st.number_input(
-                "Actual Dip Stock (Ltrs)", value=0.0, step=1.0,
-                help="Litres actually found in the tank. Can be entered as a negative number "
-                     "too if you want to log a shortage adjustment directly.")
+            dip_input = st.number_input(
+                "Dip Shortage / Excess (+/− Ltrs)", value=0.0, step=1.0,
+                help="Enter ONLY the difference found in the physical dip check — e.g. type -93 "
+                     "if 93 litres are SHORT, or 50 if 50 litres are EXCESS. Do NOT type the full "
+                     "tank reading here; the app adds/subtracts this from the Book Closing Stock.")
 
         review_stock = st.form_submit_button("👁️ Review Entry")
 
-    def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, actual_stock, dip_checked):
+    def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked):
         op_amount = op_stock * op_rate
         p_amount = p_qty * p_rate
         tot_p_amount = op_amount + p_amount
@@ -644,12 +645,9 @@ elif module == "🛢️ Daily Stock Register":
         tot_s_amount = s_qty * avg_rate
         closing_amount = tot_p_amount - tot_s_amount
         closing_stock = avail - s_qty                    # book closing stock (before dip adjustment)
-        if dip_checked:
-            dip_diff = actual_stock - closing_stock       # signed: minus = shortage, plus = excess
-        else:
-            actual_stock = closing_stock                  # no dip taken -> no variance
-            dip_diff = 0.0
+        dip_diff = dip_input if dip_checked else 0.0      # signed: minus = shortage, plus = excess
         dip_amount = dip_diff * avg_rate                  # same sign as dip_diff
+        actual_stock = closing_stock + dip_diff           # real litres in tank after adjustment
         act_amount = actual_stock * avg_rate
         final_closing = closing_stock + dip_diff          # <-- carried forward as next day's Opening Stock
         return dict(op_amount=op_amount, p_amount=p_amount, tot_p_amount=tot_p_amount,
@@ -662,13 +660,13 @@ elif module == "🛢️ Daily Stock Register":
         st.session_state["stock_pending"] = dict(
             e_date=str(e_date), item_type=item_type, op_stock=op_stock, op_rate=op_rate,
             p_qty=p_qty, p_rate=p_rate, s_qty=s_qty, s_rate=s_rate,
-            actual_stock=actual_stock, dip_checked=dip_checked,
+            dip_input=dip_input, dip_checked=dip_checked,
         )
 
     pend = st.session_state.get("stock_pending")
     if pend:
         k = stock_calc(pend["op_stock"], pend["op_rate"], pend["p_qty"], pend["p_rate"],
-                       pend["s_qty"], pend["s_rate"], pend["actual_stock"], pend["dip_checked"])
+                       pend["s_qty"], pend["s_rate"], pend["dip_input"], pend["dip_checked"])
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         r1, r2, r3 = st.columns(3)
         r1.write(f"**Date:** {pend['e_date']}")
@@ -676,7 +674,7 @@ elif module == "🛢️ Daily Stock Register":
         r1.write(f"**Available Stock:** {k['avail']:,.2f} Ltrs")
         r2.write(f"**Average Rate:** Rs. {k['avg_rate']:,.4f}")
         r2.write(f"**Book Closing Stock:** {k['closing_stock']:,.2f} Ltrs")
-        r2.write(f"**Actual Dip Stock:** {k['actual_stock']:,.2f} Ltrs"
+        r2.write(f"**Actual Dip Stock (after adjustment):** {k['actual_stock']:,.2f} Ltrs"
                  + ("" if pend["dip_checked"] else " (no dip taken)"))
         sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
         r3.write(f"**Dip Difference:** {k['dip_diff']:+,.2f} Ltrs  → {sign}")
