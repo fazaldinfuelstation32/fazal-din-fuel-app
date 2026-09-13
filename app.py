@@ -313,6 +313,38 @@ def resequence_ids(table: str):
     conn.close()
 
 
+def blank_number(label: str, min_value=None, help=None, key=None) -> float:
+    """A number field that starts EMPTY instead of pre-filled with 0.00, so the user can
+    type the quantity/rate/payment straight away without clearing anything first."""
+    raw = st.text_input(label, value="", placeholder="0", help=help, key=key)
+    raw = (raw or "").strip()
+    if raw == "":
+        return 0.0
+    try:
+        val = float(raw)
+    except ValueError:
+        st.error(f"⚠️ '{label}' mein sirf number likhein (e.g. 123.45).")
+        return 0.0
+    if min_value is not None and val < min_value:
+        st.warning(f"⚠️ '{label}' {min_value} se kam nahi ho sakta — {min_value} le liya gaya.")
+        return min_value
+    return val
+
+
+def opening_balance_now(party_name: str, party_type: str) -> float:
+    """Party's current running balance (their master Opening Balance from Master Setup
+    plus every ledger transaction so far) — i.e. the balance BEFORE a brand-new entry."""
+    conn = get_db_connection()
+    ob_row = conn.execute("SELECT opening_balance FROM parties WHERE name=? AND type=?",
+                          (party_name, party_type)).fetchone()
+    base = (ob_row["opening_balance"] if ob_row else 0.0) or 0.0
+    row = conn.execute("SELECT SUM(debit) d, SUM(credit) c FROM ledger WHERE party_name=? AND party_type=?",
+                       (party_name, party_type)).fetchone()
+    conn.close()
+    d, c = (row["d"] or 0.0), (row["c"] or 0.0)
+    return base + ((d - c) if party_type == "Customer" else (c - d))
+
+
 def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
     if df is not None and not df.empty:
         st.download_button(label, df.to_csv(index=True).encode("utf-8"),
@@ -533,21 +565,47 @@ elif module == "📅 Daily Credit Sale & Day Totals":
            WHERE party_type='Customer' AND strftime('%Y-%m', txn_date) = ?
            GROUP BY txn_date, party_name
            ORDER BY txn_date ASC, party_name ASC""", conn, params=(month,))
+
+    # --- Opening / Closing Balance per party per day (includes each party's master
+    # Opening Balance from Master Setup + every ledger transaction before that day) ---
+    parties_ob = pd.read_sql_query(
+        "SELECT name AS [Party Name], opening_balance AS MasterOpening FROM parties WHERE type='Customer'", conn)
+    full_hist = pd.read_sql_query(
+        """SELECT party_name AS [Party Name], txn_date AS Date,
+                  SUM(debit) AS DebitDay, SUM(credit) AS CreditDay
+           FROM ledger WHERE party_type='Customer'
+           GROUP BY party_name, txn_date ORDER BY party_name, txn_date""", conn)
     conn.close()
 
     if not daily.empty:
+        full_hist = full_hist.merge(parties_ob, on="Party Name", how="left")
+        full_hist["MasterOpening"] = full_hist["MasterOpening"].fillna(0.0)
+        full_hist["NetDay"] = full_hist["DebitDay"] - full_hist["CreditDay"]
+        full_hist["Closing Balance"] = full_hist["MasterOpening"] + full_hist.groupby("Party Name")["NetDay"].cumsum()
+        full_hist["Opening Balance"] = full_hist["Closing Balance"] - full_hist["NetDay"]
+
+        daily = daily.merge(full_hist[["Party Name", "Date", "Opening Balance", "Closing Balance"]],
+                            on=["Party Name", "Date"], how="left")
+        daily = daily[["Date", "Party Name", "Opening Balance", "Petrol", "Diesel",
+                       "Payment Received", "Credit Total", "Closing Balance"]]
+
         st.dataframe(sr_index(daily), use_container_width=True)
         download_csv(sr_index(daily), f"daily_credit_{month}.csv")
 
         st.markdown("### 📈 Day-Wise Totals")
-        totals = daily.groupby("Date")[["Petrol", "Diesel", "Credit Total", "Payment Received"]].sum().reset_index()
+        totals = daily.groupby("Date")[["Opening Balance", "Petrol", "Diesel", "Credit Total",
+                                        "Payment Received", "Closing Balance"]].sum().reset_index()
         st.dataframe(sr_index(totals), use_container_width=True)
 
         st.markdown("### 🧾 Month Grand Total")
-        g1, g2, g3 = st.columns(3)
+        month_start_ob = daily.sort_values("Date").groupby("Party Name").first()["Opening Balance"].sum()
+        month_end_cb = daily.sort_values("Date").groupby("Party Name").last()["Closing Balance"].sum()
+        g0, g1, g2, g3, g4 = st.columns(5)
+        g0.metric("Opening Balance (Rs.)", f"{month_start_ob:,.2f}")
         g1.metric("Petrol (Rs.)", f"{daily['Petrol'].sum():,.2f}")
         g2.metric("Diesel (Rs.)", f"{daily['Diesel'].sum():,.2f}")
         g3.metric("Payments (Rs.)", f"{daily['Payment Received'].sum():,.2f}")
+        g4.metric("Closing Balance (Rs.)", f"{month_end_cb:,.2f}")
     else:
         st.info(f"No daily entries found for month {month}.")
 
@@ -619,16 +677,16 @@ elif module == "🛢️ Daily Stock Register":
             e_date = st.date_input("Entry Date", date.today())
             st.text_input("Fuel Item", value=item_type, disabled=True)
             op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening), step=1.0)
-            op_rate = st.number_input("Opening Rate", min_value=0.0, value=0.0, step=0.1)
+            op_rate = blank_number("Opening Rate", min_value=0.0)
         with c2:
-            p_qty = st.number_input("Purchase Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
-            p_rate = st.number_input("Purchase Rate", min_value=0.0, value=0.0, step=0.1)
-            s_qty = st.number_input("Sales Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
-            s_rate = st.number_input("Sales Rate", min_value=0.0, value=0.0, step=0.1)
+            p_qty = blank_number("Purchase Qty (Ltrs)", min_value=0.0)
+            p_rate = blank_number("Purchase Rate", min_value=0.0)
+            s_qty = blank_number("Sales Qty (Ltrs)", min_value=0.0)
+            s_rate = blank_number("Sales Rate", min_value=0.0)
         with c3:
             dip_checked = st.checkbox("Physical Dip Check done today?", value=True)
-            dip_input = st.number_input(
-                "Dip Shortage / Excess (+/− Ltrs)", value=0.0, step=1.0,
+            dip_input = blank_number(
+                "Dip Shortage / Excess (+/− Ltrs)",
                 help="Enter ONLY the difference found in the physical dip check — e.g. type -93 "
                      "if 93 litres are SHORT, or 50 if 50 litres are EXCESS. Do NOT type the full "
                      "tank reading here; the app adds/subtracts this from the Book Closing Stock.")
@@ -770,9 +828,9 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Cash Payment/Voucher"])
             voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
         with c2:
-            qty = st.number_input("Qty (Ltrs)", min_value=0.0, value=0.0, step=1.0)
-            rate = st.number_input("Rate", min_value=0.0, value=0.0, step=0.1)
-            payment = st.number_input("Amount Received (Rs.)", min_value=0.0, value=0.0, step=100.0)
+            qty = blank_number("Qty (Ltrs)", min_value=0.0)
+            rate = blank_number("Rate", min_value=0.0)
+            payment = blank_number("Amount Received (Rs.)", min_value=0.0)
             desc = st.text_input("Description / Slip No.")
         review_cust = st.form_submit_button("👁️ Review Entry")
 
@@ -833,17 +891,22 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
 
     vendors = fetch_parties("Vendor")["Party Name"].tolist()
 
+    vendor_name = st.selectbox("Vendor Name (select first — Opening Balance shows below)",
+                               vendors if vendors else ["None"], key="vend_pick")
+    if vendor_name != "None":
+        ob = opening_balance_now(vendor_name, "Vendor")
+        st.info(f"**Opening Balance for {vendor_name} (before this entry):** Rs. {ob:,.2f}")
+
     with st.form("vendor_form"):
         c1, c2 = st.columns(2)
         with c1:
             txn_date = st.date_input("Date", date.today())
-            vendor_name = st.selectbox("Vendor Name", vendors if vendors else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Direct Payment"])
             voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
         with c2:
-            qty = st.number_input("Qty Received (Ltrs)", min_value=0.0, value=0.0, step=1.0)
-            rate = st.number_input("Purchase Rate", min_value=0.0, value=0.0, step=0.1)
-            paid = st.number_input("Payment Paid (Rs.)", min_value=0.0, value=0.0, step=100.0)
+            qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
+            rate = blank_number("Purchase Rate", min_value=0.0)
+            paid = blank_number("Payment Paid (Rs.)", min_value=0.0)
             desc = st.text_input("Invoice / Tanker No.")
         review_vend = st.form_submit_button("👁️ Review Entry")
 
