@@ -219,29 +219,31 @@ def init_db():
     if "voucher_no" not in existing_cols:
         cur.execute("ALTER TABLE ledger ADD COLUMN voucher_no TEXT")
 
-    existing = pd.read_sql_query("SELECT name FROM parties", conn)["name"].tolist()
+    total_parties = cur.execute("SELECT COUNT(*) c FROM parties").fetchone()["c"]
 
-    default_customers = [
-        "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
-        "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
-        "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
-        "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
-        "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
-        "Nadeem Cashier (Cash Sale)",
-    ]
-    default_vendors = [
-        "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
-        "Crown Pso", "Ittifaq Petroleum",
-    ]
+    if total_parties == 0:
+        # Only seed the starter list on a brand-new, empty database. If we checked this
+        # on every rerun instead, deleting a default party (e.g. "26/d Form") would make
+        # it silently reappear on the very next page interaction.
+        default_customers = [
+            "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
+            "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
+            "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
+            "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
+            "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
+            "Nadeem Cashier (Cash Sale)",
+        ]
+        default_vendors = [
+            "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
+            "Crown Pso", "Ittifaq Petroleum",
+        ]
 
-    for c in default_customers:
-        if c not in existing:
+        for c in default_customers:
             cur.execute(
                 "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Customer', 0.0, '')",
                 (c,),
             )
-    for v in default_vendors:
-        if v not in existing:
+        for v in default_vendors:
             cur.execute(
                 "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')",
                 (v,),
@@ -302,6 +304,7 @@ def calculate_party_balances(party_type: str) -> pd.DataFrame:
         "SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", conn, params=(party_type,)
     )
     conn.close()
+    parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
 
     rows = []
     for _, p in parties.iterrows():
@@ -645,7 +648,7 @@ elif module == "📄 Customer/Vendor Statements & Print":
     if party != "None":
         conn = get_db_connection()
         row = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party,)).fetchone()
-        op_bal = row["opening_balance"] if row else 0.0
+        op_bal = (row["opening_balance"] if row else 0.0) or 0.0
         stmt = pd.read_sql_query(
             """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
                       qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
@@ -1162,7 +1165,7 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                 new_name = c1.text_input("Name", value=row["Party Name"])
                 new_type = c1.selectbox("Type", ["Customer", "Vendor"],
                                         index=0 if row["Type"] == "Customer" else 1)
-                new_bal = c2.number_input("Opening Balance", value=float(row["Opening Balance"]), step=100.0)
+                new_bal = c2.number_input("Opening Balance", value=float(row["Opening Balance"] or 0.0), step=100.0)
                 new_phone = c2.text_input("Phone", value=row["Phone"] or "")
                 upd = st.form_submit_button("💾 Update Party")
 
@@ -1196,13 +1199,12 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
             if cnt:
                 st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries "
                           "(they will just show under a party that's no longer in Master Setup).")
-            sure = st.checkbox(f"Yes, remove '{to_del}'", key="sure_party")
+            sure = st.checkbox(f"Yes, remove '{to_del}'", key=f"sure_party_{to_del}")
             if st.button("❌ Confirm Delete Party", disabled=not sure):
                 conn = get_db_connection()
                 conn.execute("DELETE FROM parties WHERE name = ?", (to_del,))
                 conn.commit()
                 conn.close()
-                st.session_state["sure_party"] = False
                 st.success(f"✅ Party '{to_del}' removed.")
                 st.rerun()
 
@@ -1243,7 +1245,7 @@ elif module == "💾 Backup & System Recovery":
             for p in data.get("parties", []):
                 cur.execute("INSERT INTO parties (id,name,type,opening_balance,phone) VALUES (?,?,?,?,?)",
                             (p.get("id"), p.get("name"), p.get("type"),
-                             p.get("opening_balance", 0.0), p.get("phone", "")))
+                             p.get("opening_balance") or 0.0, p.get("phone") or ""))
 
             stock_cols = ["id", "entry_date", "item_type", "opening_stock", "rate", "opening_amount",
                           "purchase_qty", "purchase_rate", "purchase_amount", "total_purchase_amount",
