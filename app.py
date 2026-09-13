@@ -402,10 +402,23 @@ def next_voucher_no() -> str:
     return f"V-{max_n + 1:05d}"
 
 
+def fmt_ddmmyyyy(d) -> str:
+    """Convert any date-ish value (date object or 'YYYY-MM-DD' string) to DD-MM-YYYY for display."""
+    try:
+        return pd.to_datetime(d).strftime("%d-%m-%Y")
+    except Exception:
+        return str(d)
+
+
 def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: float,
                             stmt: pd.DataFrame, from_date, to_date):
-    """Builds a print-friendly HTML statement with a button that opens the browser's
-    native print dialog directly (Ctrl/Cmd+P equivalent) - no PDF / file save step."""
+    """Builds a print-friendly HTML statement. The print button opens the statement in a
+    brand-new blank browser window (NOT the Streamlit app page) and prints straight from
+    there. This keeps the Streamlit app's own web link/title off the printed page — only
+    the station name and statement show up, nothing else."""
+
+    from_str = fmt_ddmmyyyy(from_date)
+    to_str = fmt_ddmmyyyy(to_date)
 
     rows_html = ""
     for i, (_, r) in enumerate(stmt.iterrows(), start=1):
@@ -413,7 +426,7 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
         <tr>
             <td>{i}</td>
             <td>{r['Voucher No'] if pd.notna(r.get('Voucher No')) else ''}</td>
-            <td>{r['Date']}</td>
+            <td>{fmt_ddmmyyyy(r['Date'])}</td>
             <td>{r['Fuel'] if pd.notna(r['Fuel']) else '-'}</td>
             <td class="num">{r['Ltrs']:,.2f}</td>
             <td class="num">{r['Rate']:,.2f}</td>
@@ -423,10 +436,13 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
             <td class="num">{r['Running Balance']:,.2f}</td>
         </tr>"""
 
-    html = f"""
+    print_doc = f"""<!DOCTYPE html>
     <html>
     <head>
+    <meta charset="utf-8">
+    <title>{party} Statement</title>
     <style>
+        * {{ box-sizing: border-box; }}
         body {{ font-family: Arial, Helvetica, sans-serif; color:#0b3d24; margin:0; padding:0; }}
         .sheet {{ padding: 18px 22px; }}
         .head {{
@@ -444,21 +460,14 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
         td.num, th.num {{ text-align:right; }}
         tr:nth-child(even) {{ background:#f8faf9; }}
         .totals {{ margin-top:12px; text-align:right; font-size:14px; font-weight:bold; }}
-        .print-btn {{
-            background:linear-gradient(90deg,#1c8b4e,#2e7d32); color:#fff; border:none;
-            padding:10px 22px; border-radius:8px; font-weight:bold; font-size:14px;
-            cursor:pointer; margin-bottom:14px;
-        }}
-        @page {{ margin: 6mm; size: auto; }}
-        @media print {{ .print-btn {{ display:none; }} }}
+        @page {{ margin: 8mm; size: auto; }}
     </style>
     </head>
     <body>
         <div class="sheet">
-            <button class="print-btn" onclick="window.print()">🖨️ Print Statement Now</button>
             <div class="head">
                 <h2>⛽ FD CNG Fuel Station</h2>
-                <p>{p_type} Statement &nbsp;|&nbsp; {from_date} to {to_date}</p>
+                <p>{p_type} Statement &nbsp;|&nbsp; {from_str} to {to_str}</p>
             </div>
             <div class="info">
                 <div><b>Party:</b> {party}</div>
@@ -480,10 +489,41 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
             </table>
             <div class="totals">Closing Balance: Rs. {closing_bal:,.2f}</div>
         </div>
+        <script>
+            window.onload = function () {{
+                window.focus();
+                window.print();
+            }};
+            window.onafterprint = function () {{
+                window.close();
+            }};
+        </script>
     </body>
     </html>
     """
-    components.html(html, height=650, scrolling=True)
+
+    # Embed the printable document as a JS string literal for the trigger button below.
+    # "</script>" inside it is escaped so the OUTER <script> block doesn't get closed early.
+    safe_doc = json.dumps(print_doc).replace("</script>", "<\\/script>")
+
+    trigger_html = f"""
+    <button id="printBtn" style="
+        background:linear-gradient(90deg,#1c8b4e,#2e7d32); color:#fff; border:none;
+        padding:10px 22px; border-radius:8px; font-weight:bold; font-size:14px;
+        cursor:pointer;">🖨️ Print Statement Now</button>
+    <script>
+        document.getElementById('printBtn').onclick = function () {{
+            var doc = {safe_doc};
+            var w = window.open('', '_blank');
+            if (w) {{
+                w.document.open();
+                w.document.write(doc);
+                w.document.close();
+            }}
+        }};
+    </script>
+    """
+    components.html(trigger_html, height=60)
 
 
 # ==========================================
@@ -664,9 +704,15 @@ elif module == "📄 Customer/Vendor Statements & Print":
         stmt["Running Balance"] = rows
         closing_bal = rows[-1] if rows else op_bal
 
-        st.info(f"**{party}** | Type: {p_type} | Opening Balance: Rs. {op_bal:,.2f} | "
+        st.info(f"**{party}** | Type: {p_type} | Period: {from_date.strftime('%d-%m-%Y')} to "
+                f"{to_date.strftime('%d-%m-%Y')} | Opening Balance: Rs. {op_bal:,.2f} | "
                 f"Closing Balance: Rs. {closing_bal:,.2f}")
-        stmt_view = sr_index(stmt)
+
+        # Display copy only — dates shown as DD-MM-YYYY. The original 'stmt' (ISO dates)
+        # is kept as-is and passed to the printable statement below.
+        stmt_display = stmt.copy()
+        stmt_display["Date"] = stmt_display["Date"].apply(fmt_ddmmyyyy)
+        stmt_view = sr_index(stmt_display)
         st.dataframe(stmt_view, use_container_width=True)
         download_csv(stmt_view, f"{party}_statement.csv", "⬇️ Download CSV")
 
@@ -834,49 +880,99 @@ elif module == "🛢️ Daily Stock Register":
         st.info("No stock records yet.")
 
 # ==========================================
-# MODULE 5: CUSTOMER ENTRY (with review)
+# MODULE 5: CUSTOMER ENTRY — Fuel Sale (Cash In/Debit) & Payment Received (Cash Out/Credit)
+# kept as clearly separate entry types so an advance/payment received from a customer, and
+# the actual fuel sale entered on a different day, never get mixed up.
 # ==========================================
 elif module == "💳 Party Daily Sale & Credit Entry":
     title("Customer Credit Sale & Voucher Entry")
 
     customers = fetch_parties("Customer")["Party Name"].tolist()
 
+    st.markdown("#### 1️⃣ Choose Entry Type")
+    entry_kind = st.radio(
+        "Entry Type",
+        [
+            "🧾 Fuel Sale Entry  —  Cash In (Debit)",
+            "💵 Payment Received from Customer  —  Cash Out (Credit)",
+            "🔄 Combined (sale + payment on the exact same day)",
+        ],
+        key="cust_entry_kind",
+    )
+
+    if entry_kind.startswith("🧾"):
+        st.caption("Fuel actually given to the customer. Enter the date the fuel was sold/delivered "
+                   "— this correctly adds to the customer's receivable.")
+    elif entry_kind.startswith("💵"):
+        st.caption("Payment/advance received from the customer (before or after a sale). Enter the date "
+                   "you actually **received the cash** — this correctly reduces the customer's receivable.")
+    else:
+        st.caption("Only use this when the fuel sale and its payment both happen on the same day.")
+
     with st.form("credit_sale_form"):
         c1, c2 = st.columns(2)
-        with c1:
-            txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY")
-            party_name = st.selectbox("Customer Name", customers if customers else ["None"])
-            fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Cash Payment/Voucher"])
-            voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
-        with c2:
-            qty = blank_number("Qty (Ltrs)", min_value=0.0)
-            rate = blank_number("Rate", min_value=0.0)
-            payment = blank_number("Amount Received (Rs.)", min_value=0.0)
-            desc = st.text_input("Description / Slip No.")
+        if entry_kind.startswith("🧾"):
+            with c1:
+                txn_date = st.date_input("Sale / Delivery Date", date.today(), format="DD-MM-YYYY")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                qty = blank_number("Qty (Ltrs)", min_value=0.0)
+                rate = blank_number("Rate", min_value=0.0)
+                desc = st.text_input("Description / Slip No.")
+            payment = 0.0
+        elif entry_kind.startswith("💵"):
+            with c1:
+                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                payment = blank_number("Amount Received (Rs.)", min_value=0.0)
+                desc = st.text_input("Description / Slip No.")
+            fuel = "Cash Payment/Voucher"
+            qty, rate = 0.0, 0.0
+        else:  # Combined
+            with c1:
+                txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                qty = blank_number("Qty (Ltrs)", min_value=0.0)
+                rate = blank_number("Rate", min_value=0.0)
+                payment = blank_number("Amount Received (Rs.)", min_value=0.0)
+                desc = st.text_input("Description / Slip No.")
         review_cust = st.form_submit_button("👁️ Review Entry")
 
     if review_cust and party_name != "None":
         st.session_state["cust_pending"] = dict(
             txn_date=str(txn_date), party_name=party_name, fuel=fuel, voucher_no=voucher_no.strip(),
-            qty=qty, rate=rate, payment=payment, desc=desc)
+            qty=qty, rate=rate, payment=payment, desc=desc, entry_kind=entry_kind)
 
     pend = st.session_state.get("cust_pending")
     if pend:
         debit = pend["qty"] * pend["rate"] if pend["fuel"] != "Cash Payment/Voucher" else 0.0
         credit = pend["payment"]
+
+        if debit == 0 and credit == 0:
+            st.warning("⚠️ Nothing to save — enter either the Qty/Rate for a sale or a payment amount.")
+
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
-            "Voucher No": pend["voucher_no"], "Date": pend["txn_date"], "Customer": pend["party_name"],
+            "Voucher No": pend["voucher_no"], "Date": fmt_ddmmyyyy(pend["txn_date"]), "Customer": pend["party_name"],
             "Fuel": pend["fuel"], "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
-            "Sale (Debit)": f"{debit:,.2f}", "Received (Credit)": f"{credit:,.2f}",
+            "Sale — Cash In (Debit)": f"{debit:,.2f}",
+            "Received — Cash Out (Credit)": f"{credit:,.2f}",
             "Description": pend["desc"],
         }]))
         b1, b2 = st.columns(2)
         if b2.button("❌ Cancel", use_container_width=True):
             st.session_state.pop("cust_pending", None)
             st.rerun()
-        if b1.button("✅ Confirm & Save", use_container_width=True):
-            token = payload_token("cust", *pend.values())
+        if b1.button("✅ Confirm & Save", use_container_width=True, disabled=(debit == 0 and credit == 0)):
+            token = payload_token("cust", pend["txn_date"], pend["party_name"], pend["fuel"],
+                                   pend["voucher_no"], pend["qty"], pend["rate"], pend["payment"], pend["desc"])
             if already_saved(token):
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
@@ -897,15 +993,23 @@ elif module == "💳 Party Daily Sale & Credit Entry":
     conn = get_db_connection()
     recent = pd.read_sql_query(
         """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
-                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit,
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                  debit AS [Sale — Cash In], credit AS [Received — Cash Out],
                   description AS Description
            FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""", conn)
     conn.close()
     if not recent.empty:
+        recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
+        recent["Entry Type"] = recent.apply(
+            lambda r: "🧾 Sale" if (r["Sale — Cash In"] or 0) > 0 and (r["Received — Cash Out"] or 0) == 0
+            else ("💵 Payment" if (r["Received — Cash Out"] or 0) > 0 and (r["Sale — Cash In"] or 0) == 0
+                  else "🔄 Combined"), axis=1)
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
-# MODULE 6: VENDOR ENTRY (with review)
+# MODULE 6: VENDOR ENTRY — Purchase (Cash In/Credit) & Advance Payment (Cash Out/Debit)
+# kept as clearly separate entry types so an advance paid before the fuel arrives, and
+# the actual purchase entered later on the tanker-unload date, never get mixed up.
 # ==========================================
 elif module == "🚛 Vendor Purchasing & Dip Stock":
     title("Vendor Purchasing & Payments")
@@ -918,41 +1022,88 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         ob = opening_balance_now(vendor_name, "Vendor")
         st.info(f"**Opening Balance for {vendor_name} (before this entry):** Rs. {ob:,.2f}")
 
+    st.markdown("#### 1️⃣ Choose Entry Type")
+    entry_kind = st.radio(
+        "Entry Type",
+        [
+            "🚛 Fuel Purchase / Bill Entry  —  Cash In (Credit)",
+            "💵 Advance / Payment to Vendor  —  Cash Out (Debit)",
+            "🔄 Combined (purchase + payment on the exact same day)",
+        ],
+        key="vend_entry_kind",
+    )
+
+    if entry_kind.startswith("🚛"):
+        st.caption("Fuel actually received. Enter the date the **tanker unloads / bill is received** "
+                   "(not the earlier advance-payment date) — this correctly adds to the vendor's payable.")
+    elif entry_kind.startswith("💵"):
+        st.caption("An advance paid BEFORE the fuel arrives (or any direct payment). Enter the date you "
+                   "actually **paid the cash** — this correctly reduces the vendor's payable. The matching "
+                   "purchase entry should be added separately later, dated on the tanker-unload day.")
+    else:
+        st.caption("Only use this when the purchase and its payment both happen on the same day.")
+
     with st.form("vendor_form"):
         c1, c2 = st.columns(2)
-        with c1:
-            txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY")
-            fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Direct Payment"])
-            voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
-        with c2:
-            qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
-            rate = blank_number("Purchase Rate", min_value=0.0)
-            paid = blank_number("Payment Paid (Rs.)", min_value=0.0)
-            desc = st.text_input("Invoice / Tanker No.")
+        if entry_kind.startswith("🚛"):
+            with c1:
+                txn_date = st.date_input("Tanker Unload / Bill Date", date.today(), format="DD-MM-YYYY")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
+                rate = blank_number("Purchase Rate", min_value=0.0)
+                desc = st.text_input("Invoice / Tanker No.")
+            paid = 0.0
+        elif entry_kind.startswith("💵"):
+            with c1:
+                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                paid = blank_number("Advance / Payment Paid (Rs.)", min_value=0.0)
+                desc = st.text_input("Description (e.g. Advance for tanker booking)")
+            fuel = "Direct Payment"
+            qty, rate = 0.0, 0.0
+        else:  # Combined
+            with c1:
+                txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+            with c2:
+                qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
+                rate = blank_number("Purchase Rate", min_value=0.0)
+                paid = blank_number("Payment Paid (Rs.)", min_value=0.0)
+                desc = st.text_input("Invoice / Tanker No.")
         review_vend = st.form_submit_button("👁️ Review Entry")
 
     if review_vend and vendor_name != "None":
         st.session_state["vend_pending"] = dict(
             txn_date=str(txn_date), vendor_name=vendor_name, fuel=fuel, voucher_no=voucher_no.strip(),
-            qty=qty, rate=rate, paid=paid, desc=desc)
+            qty=qty, rate=rate, paid=paid, desc=desc, entry_kind=entry_kind)
 
     pend = st.session_state.get("vend_pending")
     if pend:
         credit = pend["qty"] * pend["rate"] if pend["fuel"] != "Direct Payment" else 0.0
         debit = pend["paid"]
+
+        if credit == 0 and debit == 0:
+            st.warning("⚠️ Nothing to save — enter either the purchase Qty/Rate or a payment amount.")
+
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
-            "Voucher No": pend["voucher_no"], "Date": pend["txn_date"], "Vendor": pend["vendor_name"],
+            "Voucher No": pend["voucher_no"], "Date": fmt_ddmmyyyy(pend["txn_date"]), "Vendor": pend["vendor_name"],
             "Fuel": pend["fuel"], "Ltrs": f"{pend['qty']:,.2f}", "Rate": f"{pend['rate']:,.2f}",
-            "Purchase (Credit)": f"{credit:,.2f}", "Paid (Debit)": f"{debit:,.2f}",
+            "Purchase — Cash In (Credit)": f"{credit:,.2f}",
+            "Paid — Cash Out (Debit)": f"{debit:,.2f}",
             "Description": pend["desc"],
         }]))
         b1, b2 = st.columns(2)
         if b2.button("❌ Cancel", use_container_width=True):
             st.session_state.pop("vend_pending", None)
             st.rerun()
-        if b1.button("✅ Confirm & Save", use_container_width=True):
-            token = payload_token("vend", *pend.values())
+        if b1.button("✅ Confirm & Save", use_container_width=True, disabled=(credit == 0 and debit == 0)):
+            token = payload_token("vend", pend["txn_date"], pend["vendor_name"], pend["fuel"],
+                                   pend["voucher_no"], pend["qty"], pend["rate"], pend["paid"], pend["desc"])
             if already_saved(token):
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
@@ -973,11 +1124,17 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
     conn = get_db_connection()
     recent = pd.read_sql_query(
         """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
-                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate, debit AS [Paid], credit AS [Purchase],
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                  debit AS [Paid — Cash Out], credit AS [Purchase — Cash In],
                   description AS Description
            FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""", conn)
     conn.close()
     if not recent.empty:
+        recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
+        recent["Entry Type"] = recent.apply(
+            lambda r: "🚛 Purchase" if (r["Purchase — Cash In"] or 0) > 0 and (r["Paid — Cash Out"] or 0) == 0
+            else ("💵 Payment" if (r["Paid — Cash Out"] or 0) > 0 and (r["Purchase — Cash In"] or 0) == 0
+                  else "🔄 Combined"), axis=1)
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
