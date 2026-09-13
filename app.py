@@ -19,6 +19,7 @@ import sqlite3
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ==========================================
 # 1. PAGE CONFIG & THEME
@@ -28,6 +29,23 @@ st.set_page_config(
     page_icon="⛽",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# Streamlit silently appends " · Streamlit" to the browser tab title, which then also
+# shows up in the browser's print header/footer. Force the real title so it never appears.
+components.html(
+    """<script>
+    (function () {
+        function fixTitle() {
+            try { if (window.parent && window.parent.document) {
+                window.parent.document.title = "FD CNG Fuel Station";
+            } } catch (e) {}
+        }
+        fixTitle();
+        setInterval(fixTitle, 800);
+    })();
+    </script>""",
+    height=0, width=0,
 )
 
 st.markdown(
@@ -385,7 +403,6 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
                             stmt: pd.DataFrame, from_date, to_date):
     """Builds a print-friendly HTML statement with a button that opens the browser's
     native print dialog directly (Ctrl/Cmd+P equivalent) - no PDF / file save step."""
-    import streamlit.components.v1 as components
 
     rows_html = ""
     for i, (_, r) in enumerate(stmt.iterrows(), start=1):
@@ -429,6 +446,7 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
             padding:10px 22px; border-radius:8px; font-weight:bold; font-size:14px;
             cursor:pointer; margin-bottom:14px;
         }}
+        @page {{ margin: 6mm; size: auto; }}
         @media print {{ .print-btn {{ display:none; }} }}
     </style>
     </head>
@@ -621,8 +639,8 @@ elif module == "📄 Customer/Vendor Statements & Print":
     party = c2.selectbox("Party Name", plist if plist else ["None"])
 
     d1, d2 = st.columns(2)
-    from_date = d1.date_input("From Date", date(date.today().year, 1, 1))
-    to_date = d2.date_input("To Date", date.today())
+    from_date = d1.date_input("From Date", date(date.today().year, 1, 1), format="DD-MM-YYYY")
+    to_date = d2.date_input("To Date", date.today(), format="DD-MM-YYYY")
 
     if party != "None":
         conn = get_db_connection()
@@ -674,7 +692,7 @@ elif module == "🛢️ Daily Stock Register":
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
-            e_date = st.date_input("Entry Date", date.today())
+            e_date = st.date_input("Entry Date", date.today(), format="DD-MM-YYYY")
             st.text_input("Fuel Item", value=item_type, disabled=True)
             op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening), step=1.0)
             op_rate = blank_number("Opening Rate", min_value=0.0)
@@ -823,7 +841,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
     with st.form("credit_sale_form"):
         c1, c2 = st.columns(2)
         with c1:
-            txn_date = st.date_input("Transaction Date", date.today())
+            txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY")
             party_name = st.selectbox("Customer Name", customers if customers else ["None"])
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Cash Payment/Voucher"])
             voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
@@ -900,7 +918,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
     with st.form("vendor_form"):
         c1, c2 = st.columns(2)
         with c1:
-            txn_date = st.date_input("Date", date.today())
+            txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY")
             fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel", "Direct Payment"])
             voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
         with c2:
@@ -1004,13 +1022,14 @@ elif module == "✏️ Edit / Manage Entries":
         entry_id = labels[picked_label]
         rec = rows[rows["id"] == entry_id].iloc[0]
 
-        tab_edit, tab_del = st.tabs(["✏️ Edit Entry", "🗑️ Delete Entry"])
+        action = st.radio("Choose Action", ["✏️ Edit Entry", "🗑️ Delete Entry"],
+                          horizontal=True, key=f"entry_action_{entry_id}")
 
-        with tab_edit:
+        if action == "✏️ Edit Entry":
             with st.form(f"edit_form_{entry_id}"):
                 e1, e2 = st.columns(2)
                 with e1:
-                    n_date = st.date_input("Date", datetime.strptime(rec["txn_date"], "%Y-%m-%d").date())
+                    n_date = st.date_input("Date", datetime.strptime(rec["txn_date"], "%Y-%m-%d").date(), format="DD-MM-YYYY")
                     party_options = fetch_parties(p_type)["Party Name"].tolist()
                     n_party = st.selectbox("Party Name", party_options,
                                            index=party_options.index(rec["party_name"])
@@ -1047,7 +1066,7 @@ elif module == "✏️ Edit / Manage Entries":
                 st.success(f"✅ Entry ID {entry_id} updated.")
                 st.rerun()
 
-        with tab_del:
+        else:  # 🗑️ Delete Entry
             st.warning(f"You are about to delete: {picked_label}")
             sure = st.checkbox("Yes, I am sure", key=f"sure_{entry_id}")
             if st.button("🗑️ Delete Entry", disabled=not sure):
@@ -1056,7 +1075,7 @@ elif module == "✏️ Edit / Manage Entries":
                 conn.commit()
                 conn.close()
                 resequence_ids("ledger")
-                st.success("Entry deleted and IDs re-sequenced.")
+                st.success("✅ Entry deleted and IDs re-sequenced.")
                 st.rerun()
 
     st.markdown("---")
@@ -1098,38 +1117,44 @@ elif module == "⚖️ Stock vs Sale Month-End Match":
 elif module == "⚙️ Master Setup (Parties/Vendors)":
     title("Master Parties Setup & Management")
 
-    tab_add, tab_edit, tab_del = st.tabs(["➕ Add Party", "✏️ Edit Party", "❌ Remove Party"])
+    action = st.radio("Choose Action", ["➕ Add Party", "✏️ Edit Party", "❌ Remove Party"],
+                      horizontal=True, key="master_setup_action")
 
-    with tab_add:
+    if action == "➕ Add Party":
         with st.form("add_party_form", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 name = st.text_input("Party / Vendor Name")
                 p_type = st.selectbox("Type", ["Customer", "Vendor"])
             with c2:
-                op_bal = st.number_input("Opening Balance (Rs.)", value=0.0, step=100.0)
+                op_bal = blank_number("Opening Balance (Rs.)")
                 phone = st.text_input("Phone Number")
             add_it = st.form_submit_button("➕ Save Party")
 
-        if add_it and name.strip():
-            token = payload_token("party", name.strip(), p_type, op_bal, phone)
-            if already_saved(token):
-                st.warning("Already saved. Duplicate blocked.")
+        if add_it:
+            if not name.strip():
+                st.error("⚠️ Party / Vendor Name is required.")
             else:
-                try:
-                    conn = get_db_connection()
-                    conn.execute("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
-                                 (name.strip(), p_type, op_bal, phone))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"Party '{name}' added.")
-                    st.rerun()
-                except sqlite3.IntegrityError:
-                    st.error("A party with this name already exists.")
+                token = payload_token("party", name.strip(), p_type, op_bal, phone)
+                if already_saved(token):
+                    st.warning("Already saved. Duplicate blocked.")
+                else:
+                    try:
+                        conn = get_db_connection()
+                        conn.execute("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
+                                     (name.strip(), p_type, op_bal, phone))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"✅ Party '{name}' added.")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("⚠️ A party with this name already exists.")
 
-    with tab_edit:
+    elif action == "✏️ Edit Party":
         allp = fetch_parties()
-        if not allp.empty:
+        if allp.empty:
+            st.info("No parties yet — add one first.")
+        else:
             sel = st.selectbox("Select Party", allp["Party Name"].tolist(), key="edit_party_sel")
             row = allp[allp["Party Name"] == sel].iloc[0]
             with st.form("edit_party_form"):
@@ -1140,33 +1165,45 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                 new_bal = c2.number_input("Opening Balance", value=float(row["Opening Balance"]), step=100.0)
                 new_phone = c2.text_input("Phone", value=row["Phone"] or "")
                 upd = st.form_submit_button("💾 Update Party")
-            if upd:
-                conn = get_db_connection()
-                conn.execute("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
-                             (new_name, new_type, sel))
-                conn.execute("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
-                             (new_name, new_type, new_bal, new_phone, sel))
-                conn.commit()
-                conn.close()
-                st.success("Party updated (ledger entries renamed too).")
-                st.rerun()
 
-    with tab_del:
+            if upd:
+                if not new_name.strip():
+                    st.error("⚠️ Name cannot be empty.")
+                else:
+                    try:
+                        conn = get_db_connection()
+                        conn.execute("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
+                                     (new_name.strip(), new_type, sel))
+                        conn.execute("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
+                                     (new_name.strip(), new_type, new_bal, new_phone, sel))
+                        conn.commit()
+                        conn.close()
+                        st.success(f"✅ Party '{sel}' updated" +
+                                  (f" → renamed to '{new_name.strip()}'." if new_name.strip() != sel else "."))
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error(f"⚠️ Another party is already named '{new_name.strip()}'.")
+
+    else:  # ❌ Remove Party
         allp = fetch_parties()
-        if not allp.empty:
+        if allp.empty:
+            st.info("No parties yet.")
+        else:
             to_del = st.selectbox("Select Party to Remove", allp["Party Name"].tolist(), key="del_party_sel")
             conn = get_db_connection()
             cnt = conn.execute("SELECT COUNT(*) c FROM ledger WHERE party_name=?", (to_del,)).fetchone()["c"]
             conn.close()
             if cnt:
-                st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries.")
-            sure = st.checkbox("Yes, remove this party", key="sure_party")
+                st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries "
+                          "(they will just show under a party that's no longer in Master Setup).")
+            sure = st.checkbox(f"Yes, remove '{to_del}'", key="sure_party")
             if st.button("❌ Confirm Delete Party", disabled=not sure):
                 conn = get_db_connection()
                 conn.execute("DELETE FROM parties WHERE name = ?", (to_del,))
                 conn.commit()
                 conn.close()
-                st.success(f"Party '{to_del}' removed.")
+                st.session_state["sure_party"] = False
+                st.success(f"✅ Party '{to_del}' removed.")
                 st.rerun()
 
     st.markdown("### 📋 Active Master List")
