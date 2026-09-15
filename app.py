@@ -8,6 +8,7 @@ Run:  streamlit run app.py
 
 import json
 import hashlib
+import threading
 from datetime import date, datetime
 import sqlite3
 
@@ -131,9 +132,21 @@ if not st.session_state["authenticated"]:
 # ==========================================
 DB_FILE = "fd_cng_fuel_station.db"
 
+# A single shared lock so concurrent Streamlit sessions don't hit the
+# same underlying connection at once (sqlite3 connections aren't safe
+# for concurrent use across threads).
+_db_lock = threading.Lock()
 
+
+@st.cache_resource(show_spinner=False)
 def get_db_connection():
-    """Turso Cloud connection using secrets with fallback to local SQLite."""
+    """Turso Cloud connection using secrets with fallback to local SQLite.
+
+    This is cached with st.cache_resource so the SAME connection/client is
+    reused across every rerun and every query. Previously a brand-new
+    connection (a fresh network round-trip for Turso) was opened and closed
+    for every single query, which is what made the app feel slow.
+    """
     turso_url = st.secrets.get("turso", {}).get("TURSO_DATABASE_URL")
     turso_token = st.secrets.get("turso", {}).get("TURSO_AUTH_TOKEN")
 
@@ -146,42 +159,38 @@ def get_db_connection():
             st.error(f"⚠️ Turso Sync Error: {e}. Falling back to local SQLite.")
 
     # Fallback to local SQLite
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
+def _is_libsql(conn) -> bool:
+    return type(conn).__module__.startswith("libsql")
+
+
 def execute_query(query, params=()):
     conn = get_db_connection()
-    try:
-        if hasattr(conn, "execute"):
-            if type(conn).__module__.startswith("libsql"):
-                res = conn.execute(query, params)
-                return res
-            else:
-                cur = conn.cursor()
-                res = cur.execute(query, params)
-                conn.commit()
-                return res
-    finally:
-        if hasattr(conn, "close"):
-            conn.close()
+    with _db_lock:
+        if _is_libsql(conn):
+            return conn.execute(query, params)
+        else:
+            cur = conn.cursor()
+            res = cur.execute(query, params)
+            conn.commit()
+            return res
 
 
 def read_df(query, params=()):
     conn = get_db_connection()
-    try:
-        if type(conn).__module__.startswith("libsql"):
+    with _db_lock:
+        if _is_libsql(conn):
             res = conn.execute(query, params)
             cols = res.columns
             rows = res.rows
             return pd.DataFrame(rows, columns=cols)
         else:
             return pd.read_sql_query(query, conn, params=params)
-    finally:
-        if hasattr(conn, "close"):
-            conn.close()
 
 
 def init_db():
@@ -263,7 +272,17 @@ def init_db():
             execute_query("INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')", (v,))
 
 
-init_db()
+@st.cache_resource(show_spinner=False)
+def _init_db_once():
+    # Streamlit reruns the whole script on every click/interaction, so
+    # without this guard init_db() (several CREATE TABLE + COUNT queries)
+    # was re-running on every single rerun. It only needs to run once
+    # per app process.
+    init_db()
+    return True
+
+
+_init_db_once()
 
 
 # ==========================================
@@ -302,23 +321,32 @@ def fetch_parties(p_type=None) -> pd.DataFrame:
 
 def calculate_party_balances(party_type: str) -> pd.DataFrame:
     parties = read_df("SELECT name, opening_balance FROM parties WHERE type = ?", params=(party_type,))
-    ledger = read_df("SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", params=(party_type,))
-
     if parties.empty:
         return pd.DataFrame()
-
     parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
-    rows = []
-    for _, p in parties.iterrows():
-        pl = ledger[ledger["party_name"] == p["name"]] if not ledger.empty else pd.DataFrame()
-        d = pl["debit"].sum() if not pl.empty else 0.0
-        c = pl["credit"].sum() if not pl.empty else 0.0
-        net = p["opening_balance"] + (d - c) if party_type == "Customer" else p["opening_balance"] + (c - d)
-        rows.append({
-            "Party Name": p["name"], "Opening Balance": p["opening_balance"],
-            "Total Debit": d, "Total Credit": c, "Net Balance": net,
-        })
-    return sr_index(pd.DataFrame(rows))
+
+    # Aggregate per-party totals in SQL instead of pulling every ledger row
+    # and looping/filtering per party in Python — much faster as the
+    # ledger grows.
+    ledger_sums = read_df(
+        """SELECT party_name, SUM(debit) AS total_debit, SUM(credit) AS total_credit
+           FROM ledger WHERE party_type = ? GROUP BY party_name""",
+        params=(party_type,))
+
+    merged = parties.merge(ledger_sums, left_on="name", right_on="party_name", how="left")
+    merged["total_debit"] = merged["total_debit"].fillna(0.0)
+    merged["total_credit"] = merged["total_credit"].fillna(0.0)
+
+    if party_type == "Customer":
+        merged["Net Balance"] = merged["opening_balance"] + (merged["total_debit"] - merged["total_credit"])
+    else:
+        merged["Net Balance"] = merged["opening_balance"] + (merged["total_credit"] - merged["total_debit"])
+
+    out = merged.rename(columns={
+        "name": "Party Name", "opening_balance": "Opening Balance",
+        "total_debit": "Total Debit", "total_credit": "Total Credit",
+    })[["Party Name", "Opening Balance", "Total Debit", "Total Credit", "Net Balance"]]
+    return sr_index(out)
 
 
 def resequence_ids(table: str):
@@ -327,10 +355,31 @@ def resequence_ids(table: str):
     if df.empty:
         return
     ids = df["id"].tolist()
-    for old in ids:
-        execute_query(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
-    for new, old in enumerate(ids, start=1):
-        execute_query(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
+    conn = get_db_connection()
+
+    if _is_libsql(conn):
+        # Turso client: no local executemany, keep the per-row calls but
+        # they now reuse the single cached connection instead of opening
+        # a brand-new one for every statement.
+        with _db_lock:
+            for old in ids:
+                conn.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
+            for new, old in enumerate(ids, start=1):
+                conn.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
+    else:
+        # Local SQLite: batch everything into two executemany calls inside
+        # one transaction instead of N individual round trips.
+        with _db_lock:
+            cur = conn.cursor()
+            cur.executemany(
+                f"UPDATE {table} SET id = ? WHERE id = ?",
+                [(old + 1_000_000, old) for old in ids],
+            )
+            cur.executemany(
+                f"UPDATE {table} SET id = ? WHERE id = ?",
+                [(new, old + 1_000_000) for new, old in enumerate(ids, start=1)],
+            )
+            conn.commit()
 
 
 def blank_number(label: str, min_value=None, help=None, key=None) -> float:
