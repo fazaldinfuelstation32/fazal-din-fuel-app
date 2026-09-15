@@ -1,7 +1,7 @@
 """
 FD CNG Fuel Station - Management App (Turso Cloud Integrated)
 =============================================================
-Supports Turso Cloud Database via libsql with local fallback.
+Supports Turso Cloud Database via libsql-client with local fallback.
 
 Run:  streamlit run app.py
 """
@@ -17,7 +17,7 @@ import streamlit.components.v1 as components
 
 # Turso Client Import
 try:
-    import libsql_experimental as libsql
+    import libsql_client as libsql
     HAS_TURSO = True
 except ImportError:
     HAS_TURSO = False
@@ -139,8 +139,8 @@ def get_db_connection():
 
     if HAS_TURSO and turso_url and turso_token:
         try:
-            conn = libsql.connect(DB_FILE, sync_url=turso_url, auth_token=turso_token)
-            conn.sync()
+            url = turso_url.replace("libsql://", "https://")
+            conn = libsql.create_client_sync(url=url, auth_token=turso_token)
             return conn
         except Exception as e:
             st.error(f"⚠️ Turso Sync Error: {e}. Falling back to local SQLite.")
@@ -152,101 +152,115 @@ def get_db_connection():
     return conn
 
 
-def init_db():
+def execute_query(query, params=()):
     conn = get_db_connection()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS parties (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT UNIQUE NOT NULL,
-                type TEXT CHECK(type IN ('Customer','Vendor')) NOT NULL,
-                opening_balance REAL DEFAULT 0.0,
-                phone TEXT
-            )"""
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS stock_register (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_date TEXT NOT NULL,
-                item_type TEXT CHECK(item_type IN ('Petrol','Diesel')) NOT NULL,
-                opening_stock REAL DEFAULT 0.0,
-                rate REAL DEFAULT 0.0,
-                opening_amount REAL DEFAULT 0.0,
-                purchase_qty REAL DEFAULT 0.0,
-                purchase_rate REAL DEFAULT 0.0,
-                purchase_amount REAL DEFAULT 0.0,
-                total_purchase_amount REAL DEFAULT 0.0,
-                avg_rate REAL DEFAULT 0.0,
-                available_stock REAL DEFAULT 0.0,
-                sales_qty REAL DEFAULT 0.0,
-                sales_rate REAL DEFAULT 0.0,
-                sales_amount REAL DEFAULT 0.0,
-                total_sales_amount REAL DEFAULT 0.0,
-                closing_amount REAL DEFAULT 0.0,
-                closing_stock REAL DEFAULT 0.0,
-                dip_diff REAL DEFAULT 0.0,
-                actual_stock REAL DEFAULT 0.0,
-                actual_amount REAL DEFAULT 0.0
-            )"""
-        )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS ledger (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                txn_date TEXT NOT NULL,
-                party_name TEXT NOT NULL,
-                party_type TEXT CHECK(party_type IN ('Customer','Vendor')) NOT NULL,
-                item_type TEXT,
-                qty_ltrs REAL DEFAULT 0.0,
-                rate REAL DEFAULT 0.0,
-                debit REAL DEFAULT 0.0,
-                credit REAL DEFAULT 0.0,
-                description TEXT,
-                voucher_no TEXT
-            )"""
-        )
-
-        existing_cols = [r[1] for r in cur.execute("PRAGMA table_info(ledger)").fetchall()]
-        if "voucher_no" not in existing_cols:
-            cur.execute("ALTER TABLE ledger ADD COLUMN voucher_no TEXT")
-
-        total_parties = cur.execute("SELECT COUNT(*) c FROM parties").fetchone()[0]
-
-        if total_parties == 0:
-            default_customers = [
-                "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
-                "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
-                "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
-                "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
-                "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
-                "Nadeem Cashier (Cash Sale)",
-            ]
-            default_vendors = [
-                "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
-                "Crown Pso", "Ittifaq Petroleum",
-            ]
-
-            for c in default_customers:
-                cur.execute(
-                    "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Customer', 0.0, '')",
-                    (c,),
-                )
-            for v in default_vendors:
-                cur.execute(
-                    "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')",
-                    (v,),
-                )
-
-        conn.commit()
-        if hasattr(conn, "sync"):
-            conn.sync()
+        if hasattr(conn, "execute"):
+            if type(conn).__module__.startswith("libsql"):
+                res = conn.execute(query, params)
+                return res
+            else:
+                cur = conn.cursor()
+                res = cur.execute(query, params)
+                conn.commit()
+                return res
     finally:
-        conn.close()
+        if hasattr(conn, "close"):
+            conn.close()
+
+
+def read_df(query, params=()):
+    conn = get_db_connection()
+    try:
+        if type(conn).__module__.startswith("libsql"):
+            res = conn.execute(query, params)
+            cols = res.columns
+            rows = res.rows
+            return pd.DataFrame(rows, columns=cols)
+        else:
+            return pd.read_sql_query(query, conn, params=params)
+    finally:
+        if hasattr(conn, "close"):
+            conn.close()
+
+
+def init_db():
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS parties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            type TEXT CHECK(type IN ('Customer','Vendor')) NOT NULL,
+            opening_balance REAL DEFAULT 0.0,
+            phone TEXT
+        )"""
+    )
+
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS stock_register (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_date TEXT NOT NULL,
+            item_type TEXT CHECK(item_type IN ('Petrol','Diesel')) NOT NULL,
+            opening_stock REAL DEFAULT 0.0,
+            rate REAL DEFAULT 0.0,
+            opening_amount REAL DEFAULT 0.0,
+            purchase_qty REAL DEFAULT 0.0,
+            purchase_rate REAL DEFAULT 0.0,
+            purchase_amount REAL DEFAULT 0.0,
+            total_purchase_amount REAL DEFAULT 0.0,
+            avg_rate REAL DEFAULT 0.0,
+            available_stock REAL DEFAULT 0.0,
+            sales_qty REAL DEFAULT 0.0,
+            sales_rate REAL DEFAULT 0.0,
+            sales_amount REAL DEFAULT 0.0,
+            total_sales_amount REAL DEFAULT 0.0,
+            closing_amount REAL DEFAULT 0.0,
+            closing_stock REAL DEFAULT 0.0,
+            dip_diff REAL DEFAULT 0.0,
+            actual_stock REAL DEFAULT 0.0,
+            actual_amount REAL DEFAULT 0.0
+        )"""
+    )
+
+    execute_query(
+        """
+        CREATE TABLE IF NOT EXISTS ledger (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            txn_date TEXT NOT NULL,
+            party_name TEXT NOT NULL,
+            party_type TEXT CHECK(party_type IN ('Customer','Vendor')) NOT NULL,
+            item_type TEXT,
+            qty_ltrs REAL DEFAULT 0.0,
+            rate REAL DEFAULT 0.0,
+            debit REAL DEFAULT 0.0,
+            credit REAL DEFAULT 0.0,
+            description TEXT,
+            voucher_no TEXT
+        )"""
+    )
+
+    df_p = read_df("SELECT COUNT(*) c FROM parties")
+    total_parties = df_p.iloc[0]["c"] if not df_p.empty else 0
+
+    if total_parties == 0:
+        default_customers = [
+            "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
+            "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
+            "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
+            "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
+            "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
+            "Nadeem Cashier (Cash Sale)",
+        ]
+        default_vendors = [
+            "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
+            "Crown Pso", "Ittifaq Petroleum",
+        ]
+
+        for c in default_customers:
+            execute_query("INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Customer', 0.0, '')", (c,))
+        for v in default_vendors:
+            execute_query("INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')", (v,))
 
 
 init_db()
@@ -277,36 +291,28 @@ def already_saved(token: str) -> bool:
 
 
 def fetch_parties(p_type=None) -> pd.DataFrame:
-    conn = get_db_connection()
-    try:
-        base = ("SELECT id, name AS [Party Name], type AS [Type], "
-                "opening_balance AS [Opening Balance], phone AS [Phone] FROM parties ")
-        if p_type:
-            df = pd.read_sql_query(base + "WHERE type = ? ORDER BY name ASC", conn, params=(p_type,))
-        else:
-            df = pd.read_sql_query(base + "ORDER BY type ASC, name ASC", conn)
-    finally:
-        conn.close()
+    base = ("SELECT id, name AS [Party Name], type AS [Type], "
+            "opening_balance AS [Opening Balance], phone AS [Phone] FROM parties ")
+    if p_type:
+        df = read_df(base + "WHERE type = ? ORDER BY name ASC", params=(p_type,))
+    else:
+        df = read_df(base + "ORDER BY type ASC, name ASC")
     return df
 
 
 def calculate_party_balances(party_type: str) -> pd.DataFrame:
-    conn = get_db_connection()
-    try:
-        parties = pd.read_sql_query(
-            "SELECT name, opening_balance FROM parties WHERE type = ?", conn, params=(party_type,)
-        )
-        ledger = pd.read_sql_query(
-            "SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", conn, params=(party_type,)
-        )
-    finally:
-        conn.close()
+    parties = read_df("SELECT name, opening_balance FROM parties WHERE type = ?", params=(party_type,))
+    ledger = read_df("SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", params=(party_type,))
+
+    if parties.empty:
+        return pd.DataFrame()
 
     parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
     rows = []
     for _, p in parties.iterrows():
-        pl = ledger[ledger["party_name"] == p["name"]]
-        d, c = pl["debit"].sum(), pl["credit"].sum()
+        pl = ledger[ledger["party_name"] == p["name"]] if not ledger.empty else pd.DataFrame()
+        d = pl["debit"].sum() if not pl.empty else 0.0
+        c = pl["credit"].sum() if not pl.empty else 0.0
         net = p["opening_balance"] + (d - c) if party_type == "Customer" else p["opening_balance"] + (c - d)
         rows.append({
             "Party Name": p["name"], "Opening Balance": p["opening_balance"],
@@ -317,25 +323,14 @@ def calculate_party_balances(party_type: str) -> pd.DataFrame:
 
 def resequence_ids(table: str):
     date_col = "txn_date" if table == "ledger" else "entry_date"
-    conn = get_db_connection()
-    try:
-        cur = conn.cursor()
-        ids = [r[0] for r in cur.execute(f"SELECT id FROM {table} ORDER BY {date_col} ASC, id ASC")]
-        for old in ids:
-            cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
-        for new, old in enumerate(ids, start=1):
-            cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
-        
-        seq_exists = cur.execute("SELECT COUNT(*) FROM sqlite_sequence WHERE name = ?", (table,)).fetchone()[0]
-        if seq_exists:
-            cur.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (len(ids), table))
-        else:
-            cur.execute("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)", (len(ids), table))
-        conn.commit()
-        if hasattr(conn, "sync"):
-            conn.sync()
-    finally:
-        conn.close()
+    df = read_df(f"SELECT id FROM {table} ORDER BY {date_col} ASC, id ASC")
+    if df.empty:
+        return
+    ids = df["id"].tolist()
+    for old in ids:
+        execute_query(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
+    for new, old in enumerate(ids, start=1):
+        execute_query(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
 
 
 def blank_number(label: str, min_value=None, help=None, key=None) -> float:
@@ -355,16 +350,14 @@ def blank_number(label: str, min_value=None, help=None, key=None) -> float:
 
 
 def opening_balance_now(party_name: str, party_type: str) -> float:
-    conn = get_db_connection()
-    try:
-        ob_row = conn.execute("SELECT opening_balance FROM parties WHERE name=? AND type=?",
-                              (party_name, party_type)).fetchone()
-        base = (ob_row["opening_balance"] if ob_row else 0.0) or 0.0
-        row = conn.execute("SELECT SUM(debit) d, SUM(credit) c FROM ledger WHERE party_name=? AND party_type=?",
-                           (party_name, party_type)).fetchone()
-    finally:
-        conn.close()
-    d, c = (row["d"] or 0.0) if row else 0.0, (row["c"] or 0.0) if row else 0.0
+    ob_df = read_df("SELECT opening_balance FROM parties WHERE name=? AND type=?", params=(party_name, party_type))
+    base = ob_df.iloc[0]["opening_balance"] if not ob_df.empty else 0.0
+    base = base or 0.0
+
+    l_df = read_df("SELECT SUM(debit) d, SUM(credit) c FROM ledger WHERE party_name=? AND party_type=?", params=(party_name, party_type))
+    d = l_df.iloc[0]["d"] if not l_df.empty and l_df.iloc[0]["d"] is not None else 0.0
+    c = l_df.iloc[0]["c"] if not l_df.empty and l_df.iloc[0]["c"] is not None else 0.0
+
     return base + ((d - c) if party_type == "Customer" else (c - d))
 
 
@@ -375,30 +368,22 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
 
 
 def last_closing_stock(item_type: str) -> float:
-    conn = get_db_connection()
-    try:
-        row = conn.execute(
-            """SELECT closing_stock, dip_diff FROM stock_register
-               WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
-            (item_type,)).fetchone()
-    finally:
-        conn.close()
-    if row is None:
+    df = read_df("""SELECT closing_stock, dip_diff FROM stock_register
+                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""", params=(item_type,))
+    if df.empty:
         return 0.0
+    row = df.iloc[0]
     return (row["closing_stock"] or 0.0) + (row["dip_diff"] or 0.0)
 
 
 def next_voucher_no() -> str:
-    conn = get_db_connection()
-    try:
-        rows = conn.execute("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL").fetchall()
-    finally:
-        conn.close()
+    df = read_df("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL")
     max_n = 0
-    for r in rows:
-        digits = "".join(ch for ch in (r["voucher_no"] or "") if ch.isdigit())
-        if digits:
-            max_n = max(max_n, int(digits))
+    if not df.empty:
+        for r in df["voucher_no"]:
+            digits = "".join(ch for ch in str(r or "") if ch.isdigit())
+            if digits:
+                max_n = max(max_n, int(digits))
     return f"V-{max_n + 1:05d}"
 
 
@@ -566,13 +551,9 @@ if module == "📊 Dashboard & Monthly Analytics":
     receivables = cust_df["Net Balance"].sum() if not cust_df.empty else 0.0
     payables = vend_df["Net Balance"].sum() if not vend_df.empty else 0.0
 
-    conn = get_db_connection()
-    try:
-        fuel = pd.read_sql_query(
-            "SELECT item_type, SUM(qty_ltrs) total FROM ledger "
-            "WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type", conn)
-    finally:
-        conn.close()
+    fuel = read_df(
+        "SELECT item_type, SUM(qty_ltrs) total FROM ledger "
+        "WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type")
 
     petrol = fuel.loc[fuel["item_type"] == "Petrol", "total"].sum() if not fuel.empty else 0.0
     diesel = fuel.loc[fuel["item_type"] == "Diesel", "total"].sum() if not fuel.empty else 0.0
@@ -587,16 +568,12 @@ if module == "📊 Dashboard & Monthly Analytics":
         col.markdown(f"<div class='metric-card'><h4>{h}</h4><p>{v}</p></div>", unsafe_allow_html=True)
 
     st.markdown("### 📊 Multi-Month Party Sales Summary")
-    conn = get_db_connection()
-    try:
-        matrix = pd.read_sql_query(
-            """SELECT party_name AS [Party Name], strftime('%Y-%m', txn_date) AS Month,
-                      item_type AS [Fuel Item], SUM(debit) AS [Total Amount]
-               FROM ledger
-               WHERE party_type='Customer' AND item_type IN ('Petrol','Diesel')
-               GROUP BY party_name, Month, item_type""", conn)
-    finally:
-        conn.close()
+    matrix = read_df(
+        """SELECT party_name AS [Party Name], strftime('%Y-%m', txn_date) AS Month,
+                  item_type AS [Fuel Item], SUM(debit) AS [Total Amount]
+           FROM ledger
+           WHERE party_type='Customer' AND item_type IN ('Petrol','Diesel')
+           GROUP BY party_name, Month, item_type""")
 
     if not matrix.empty:
         pivot = matrix.pivot_table(index="Party Name", columns=["Month", "Fuel Item"],
@@ -622,28 +599,23 @@ elif module == "📅 Daily Credit Sale & Day Totals":
 
     month = st.text_input("Filter Month (YYYY-MM)", value=date.today().strftime("%Y-%m"))
 
-    conn = get_db_connection()
-    try:
-        daily = pd.read_sql_query(
-            """SELECT txn_date AS Date, party_name AS [Party Name],
-                      SUM(CASE WHEN item_type='Petrol' THEN debit ELSE 0 END) AS Petrol,
-                      SUM(CASE WHEN item_type='Diesel' THEN debit ELSE 0 END) AS Diesel,
-                      SUM(credit) AS [Payment Received],
-                      SUM(debit)  AS [Credit Total]
-               FROM ledger
-               WHERE party_type='Customer' AND strftime('%Y-%m', txn_date) = ?
-               GROUP BY txn_date, party_name
-               ORDER BY txn_date ASC, party_name ASC""", conn, params=(month,))
+    daily = read_df(
+        """SELECT txn_date AS Date, party_name AS [Party Name],
+                  SUM(CASE WHEN item_type='Petrol' THEN debit ELSE 0 END) AS Petrol,
+                  SUM(CASE WHEN item_type='Diesel' THEN debit ELSE 0 END) AS Diesel,
+                  SUM(credit) AS [Payment Received],
+                  SUM(debit)  AS [Credit Total]
+           FROM ledger
+           WHERE party_type='Customer' AND strftime('%Y-%m', txn_date) = ?
+           GROUP BY txn_date, party_name
+           ORDER BY txn_date ASC, party_name ASC""", params=(month,))
 
-        parties_ob = pd.read_sql_query(
-            "SELECT name AS [Party Name], opening_balance AS MasterOpening FROM parties WHERE type='Customer'", conn)
-        full_hist = pd.read_sql_query(
-            """SELECT party_name AS [Party Name], txn_date AS Date,
-                      SUM(debit) AS DebitDay, SUM(credit) AS CreditDay
-               FROM ledger WHERE party_type='Customer'
-               GROUP BY party_name, txn_date ORDER BY party_name, txn_date""", conn)
-    finally:
-        conn.close()
+    parties_ob = read_df("SELECT name AS [Party Name], opening_balance AS MasterOpening FROM parties WHERE type='Customer'")
+    full_hist = read_df(
+        """SELECT party_name AS [Party Name], txn_date AS Date,
+                  SUM(debit) AS DebitDay, SUM(credit) AS CreditDay
+           FROM ledger WHERE party_type='Customer'
+           GROUP BY party_name, txn_date ORDER BY party_name, txn_date""")
 
     if not daily.empty:
         full_hist = full_hist.merge(parties_ob, on="Party Name", how="left")
@@ -693,18 +665,16 @@ elif module == "📄 Customer/Vendor Statements & Print":
     to_date = d2.date_input("To Date", date.today(), format="DD-MM-YYYY")
 
     if party != "None":
-        conn = get_db_connection()
-        try:
-            row = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party,)).fetchone()
-            op_bal = (row["opening_balance"] if row else 0.0) or 0.0
-            stmt = pd.read_sql_query(
-                """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
-                          qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
-                   FROM ledger WHERE party_name = ? AND txn_date BETWEEN ? AND ?
-                   ORDER BY txn_date ASC, id ASC""",
-                conn, params=(party, str(from_date), str(to_date)))
-        finally:
-            conn.close()
+        row_df = read_df("SELECT opening_balance FROM parties WHERE name = ?", params=(party,))
+        op_bal = row_df.iloc[0]["opening_balance"] if not row_df.empty else 0.0
+        op_bal = op_bal or 0.0
+
+        stmt = read_df(
+            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
+                      qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
+               FROM ledger WHERE party_name = ? AND txn_date BETWEEN ? AND ?
+               ORDER BY txn_date ASC, id ASC""",
+            params=(party, str(from_date), str(to_date)))
 
         bal, rows = op_bal, []
         for _, r in stmt.iterrows():
@@ -802,13 +772,9 @@ elif module == "🛢️ Daily Stock Register":
         r3.write(f"**Dip Diff Amount:** Rs. {k['dip_amount']:+,.2f}")
         r3.write(f"**Closing Amount:** Rs. {k['closing_amount']:,.2f}")
 
-        conn = get_db_connection()
-        try:
-            dup = conn.execute("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
-                               (pend["e_date"], pend["item_type"])).fetchone()["c"]
-        finally:
-            conn.close()
-            
+        dup_df = read_df("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?", params=(pend["e_date"], pend["item_type"]))
+        dup = dup_df.iloc[0]["c"] if not dup_df.empty else 0
+
         if dup:
             st.warning(f"⚠️ {dup} entry already exists for {pend['e_date']} / {pend['item_type']}.")
 
@@ -825,42 +791,31 @@ elif module == "🛢️ Daily Stock Register":
             if already_saved(token):
                 st.warning("This entry was already saved. Duplicate save blocked.")
             else:
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        """INSERT INTO stock_register (
-                            entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
-                            purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
-                            sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
-                         pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
-                         k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
-                         k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
-                    )
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query(
+                    """INSERT INTO stock_register (
+                        entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
+                        purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
+                        sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
+                     pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
+                     k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
+                     k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
+                )
                 st.session_state.pop("stock_pending", None)
                 st.success("✅ Daily stock entry saved.")
                 st.rerun()
 
     st.markdown("### 📊 Existing Stock Records")
-    conn = get_db_connection()
-    try:
-        stock_df = pd.read_sql_query(
-            """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
-                      opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
-                      purchase_rate AS [Purchase Rate], sales_qty AS [Sales Qty], sales_rate AS [Sales Rate],
-                      avg_rate AS [Avg Rate], closing_stock AS [Closing Stock],
-                      actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
-                      ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
-                      ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
-               FROM stock_register ORDER BY entry_date DESC, id DESC""", conn)
-    finally:
-        conn.close()
+    stock_df = read_df(
+        """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
+                  opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
+                  purchase_rate AS [Purchase Rate], sales_qty AS [Sales Qty], sales_rate AS [Sales Rate],
+                  avg_rate AS [Avg Rate], closing_stock AS [Closing Stock],
+                  actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
+                  ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
+                  ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
+           FROM stock_register ORDER BY entry_date DESC, id DESC""")
 
     if not stock_df.empty:
         stock_df["Dip Status"] = stock_df["Dip Difference"].apply(
@@ -872,14 +827,7 @@ elif module == "🛢️ Daily Stock Register":
         ids = stock_df["Entry ID"].tolist()
         del_id = st.selectbox("Select Entry ID to delete", ids)
         if st.button("Delete Selected Stock Entry"):
-            conn = get_db_connection()
-            try:
-                conn.execute("DELETE FROM stock_register WHERE id = ?", (int(del_id),))
-                conn.commit()
-                if hasattr(conn, "sync"):
-                    conn.sync()
-            finally:
-                conn.close()
+            execute_query("DELETE FROM stock_register WHERE id = ?", (int(del_id),))
             resequence_ids("stock_register")
             st.success("Entry deleted and IDs re-sequenced.")
             st.rerun()
@@ -972,34 +920,23 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             if already_saved(token):
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                           VALUES (?,?,'Customer',?,?,?,?,?,?,?)""",
-                        (pend["txn_date"], pend["party_name"],
-                         None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
-                         pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query(
+                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,'Customer',?,?,?,?,?,?,?)""",
+                    (pend["txn_date"], pend["party_name"],
+                     None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
+                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 st.session_state.pop("cust_pending", None)
                 st.success("✅ Customer transaction saved.")
                 st.rerun()
 
     st.markdown("### 🕒 Last 10 Customer Entries")
-    conn = get_db_connection()
-    try:
-        recent = pd.read_sql_query(
-            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
-                      item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
-                      debit AS [Sale — Cash In], credit AS [Received — Cash Out],
-                      description AS Description
-               FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""", conn)
-    finally:
-        conn.close()
+    recent = read_df(
+        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                  debit AS [Sale — Cash In], credit AS [Received — Cash Out],
+                  description AS Description
+           FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""")
 
     if not recent.empty:
         recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
@@ -1093,34 +1030,23 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
             if already_saved(token):
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                           VALUES (?,?,'Vendor',?,?,?,?,?,?,?)""",
-                        (pend["txn_date"], pend["vendor_name"],
-                         None if pend["fuel"] == "Direct Payment" else pend["fuel"],
-                         pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query(
+                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,'Vendor',?,?,?,?,?,?,?)""",
+                    (pend["txn_date"], pend["vendor_name"],
+                     None if pend["fuel"] == "Direct Payment" else pend["fuel"],
+                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 st.session_state.pop("vend_pending", None)
                 st.success("✅ Vendor transaction saved.")
                 st.rerun()
 
     st.markdown("### 🕒 Last 10 Vendor Entries")
-    conn = get_db_connection()
-    try:
-        recent = pd.read_sql_query(
-            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
-                      item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
-                      debit AS [Paid — Cash Out], credit AS [Purchase — Cash In],
-                      description AS Description
-               FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""", conn)
-    finally:
-        conn.close()
+    recent = read_df(
+        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
+                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                  debit AS [Paid — Cash Out], credit AS [Purchase — Cash In],
+                  description AS Description
+           FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""")
 
     if not recent.empty:
         recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
@@ -1148,11 +1074,7 @@ elif module == "✏️ Edit / Manage Entries":
         params += [f"%{search}%", f"%{search}%"]
     q += " ORDER BY txn_date DESC, id DESC"
 
-    conn = get_db_connection()
-    try:
-        rows = pd.read_sql_query(q, conn, params=params)
-    finally:
-        conn.close()
+    rows = read_df(q, params=params)
 
     if rows.empty:
         st.info("No entries found for this selection.")
@@ -1205,19 +1127,12 @@ elif module == "✏️ Edit / Manage Entries":
                         d_val = n_qty * n_rate
                     else:
                         c_val = n_qty * n_rate
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        """UPDATE ledger SET txn_date=?, party_name=?, item_type=?, qty_ltrs=?, rate=?,
-                                  debit=?, credit=?, description=?, voucher_no=? WHERE id=?""",
-                        (str(n_date), n_party,
-                         None if n_fuel == "None (Payment Only)" else n_fuel,
-                         n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query(
+                    """UPDATE ledger SET txn_date=?, party_name=?, item_type=?, qty_ltrs=?, rate=?,
+                              debit=?, credit=?, description=?, voucher_no=? WHERE id=?""",
+                    (str(n_date), n_party,
+                     None if n_fuel == "None (Payment Only)" else n_fuel,
+                     n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
                 st.success(f"✅ Entry ID {entry_id} updated.")
                 st.rerun()
 
@@ -1225,14 +1140,7 @@ elif module == "✏️ Edit / Manage Entries":
             st.warning(f"You are about to delete: {picked_label}")
             sure = st.checkbox("Yes, I am sure", key=f"sure_{entry_id}")
             if st.button("🗑️ Delete Entry", disabled=not sure):
-                conn = get_db_connection()
-                try:
-                    conn.execute("DELETE FROM ledger WHERE id = ?", (entry_id,))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query("DELETE FROM ledger WHERE id = ?", (entry_id,))
                 resequence_ids("ledger")
                 st.success("✅ Entry deleted and IDs re-sequenced.")
                 st.rerun()
@@ -1250,17 +1158,13 @@ elif module == "✏️ Edit / Manage Entries":
 elif module == "⚖️ Stock vs Sale Month-End Match":
     title("Stock vs Sales Reconciliation")
 
-    conn = get_db_connection()
-    try:
-        stock_summary = pd.read_sql_query(
-            """SELECT item_type AS [Fuel Item], SUM(purchase_qty) AS [Total Purchased],
-                      SUM(sales_qty) AS [Total Stock Sales], SUM(dip_diff) AS [Total Dip Variance]
-               FROM stock_register GROUP BY item_type""", conn)
-        ledger_summary = pd.read_sql_query(
-            """SELECT item_type AS [Fuel Item], SUM(qty_ltrs) AS [Total Ledger Sales]
-               FROM ledger WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type""", conn)
-    finally:
-        conn.close()
+    stock_summary = read_df(
+        """SELECT item_type AS [Fuel Item], SUM(purchase_qty) AS [Total Purchased],
+                  SUM(sales_qty) AS [Total Stock Sales], SUM(dip_diff) AS [Total Dip Variance]
+           FROM stock_register GROUP BY item_type""")
+    ledger_summary = read_df(
+        """SELECT item_type AS [Fuel Item], SUM(qty_ltrs) AS [Total Ledger Sales]
+           FROM ledger WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type""")
 
     rec = pd.merge(stock_summary, ledger_summary, on="Fuel Item", how="outer").fillna(0)
     if not rec.empty:
@@ -1301,19 +1205,12 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                     st.warning("Already saved. Duplicate blocked.")
                 else:
                     try:
-                        conn = get_db_connection()
-                        try:
-                            conn.execute("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
-                                         (name.strip(), p_type, op_bal, phone))
-                            conn.commit()
-                            if hasattr(conn, "sync"):
-                                conn.sync()
-                        finally:
-                            conn.close()
+                        execute_query("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
+                                      (name.strip(), p_type, op_bal, phone))
                         st.success(f"✅ Party '{name}' added.")
                         st.rerun()
-                    except sqlite3.IntegrityError:
-                        st.error("⚠️ A party with this name already exists.")
+                    except Exception:
+                        st.error("⚠️ A party with this name already exists or query error.")
 
     elif action == "✏️ Edit Party":
         allp = fetch_parties()
@@ -1336,20 +1233,13 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                     st.error("⚠️ Name cannot be empty.")
                 else:
                     try:
-                        conn = get_db_connection()
-                        try:
-                            conn.execute("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
-                                         (new_name.strip(), new_type, sel))
-                            conn.execute("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
-                                         (new_name.strip(), new_type, new_bal, new_phone, sel))
-                            conn.commit()
-                            if hasattr(conn, "sync"):
-                                conn.sync()
-                        finally:
-                            conn.close()
+                        execute_query("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
+                                      (new_name.strip(), new_type, sel))
+                        execute_query("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
+                                      (new_name.strip(), new_type, new_bal, new_phone, sel))
                         st.success(f"✅ Party '{sel}' updated.")
                         st.rerun()
-                    except sqlite3.IntegrityError:
+                    except Exception:
                         st.error(f"⚠️ Another party is already named '{new_name.strip()}'.")
 
     else:
@@ -1358,23 +1248,13 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
             st.info("No parties yet.")
         else:
             to_del = st.selectbox("Select Party to Remove", allp["Party Name"].tolist(), key="del_party_sel")
-            conn = get_db_connection()
-            try:
-                cnt = conn.execute("SELECT COUNT(*) c FROM ledger WHERE party_name=?", (to_del,)).fetchone()["c"]
-            finally:
-                conn.close()
+            cnt_df = read_df("SELECT COUNT(*) c FROM ledger WHERE party_name=?", params=(to_del,))
+            cnt = cnt_df.iloc[0]["c"] if not cnt_df.empty else 0
             if cnt:
                 st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries.")
             sure = st.checkbox(f"Yes, remove '{to_del}'", key=f"sure_party_{to_del}")
             if st.button("❌ Confirm Delete Party", disabled=not sure):
-                conn = get_db_connection()
-                try:
-                    conn.execute("DELETE FROM parties WHERE name = ?", (to_del,))
-                    conn.commit()
-                    if hasattr(conn, "sync"):
-                        conn.sync()
-                finally:
-                    conn.close()
+                execute_query("DELETE FROM parties WHERE name = ?", (to_del,))
                 st.success(f"✅ Party '{to_del}' removed.")
                 st.rerun()
 
@@ -1387,15 +1267,11 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
 elif module == "💾 Backup & System Recovery":
     title("Database Backup & System Recovery")
 
-    conn = get_db_connection()
-    try:
-        backup = {
-            "parties": pd.read_sql_query("SELECT * FROM parties", conn).to_dict(orient="records"),
-            "stock_register": pd.read_sql_query("SELECT * FROM stock_register", conn).to_dict(orient="records"),
-            "ledger": pd.read_sql_query("SELECT * FROM ledger", conn).to_dict(orient="records"),
-        }
-    finally:
-        conn.close()
+    backup = {
+        "parties": read_df("SELECT * FROM parties").to_dict(orient="records"),
+        "stock_register": read_df("SELECT * FROM stock_register").to_dict(orient="records"),
+        "ledger": read_df("SELECT * FROM ledger").to_dict(orient="records"),
+    }
 
     st.download_button("💾 Download JSON Backup", json.dumps(backup, indent=2),
                        file_name=f"FD_CNG_Backup_{date.today()}.json", mime="application/json")
@@ -1408,41 +1284,33 @@ elif module == "💾 Backup & System Recovery":
         sure = st.checkbox("I understand this will replace all current data")
         if st.button("⚠️ Confirm System Restore", disabled=not sure):
             data = json.load(up)
-            conn = get_db_connection()
-            try:
-                cur = conn.cursor()
-                cur.execute("DELETE FROM parties")
-                cur.execute("DELETE FROM stock_register")
-                cur.execute("DELETE FROM ledger")
+            execute_query("DELETE FROM parties")
+            execute_query("DELETE FROM stock_register")
+            execute_query("DELETE FROM ledger")
 
-                for p in data.get("parties", []):
-                    cur.execute("INSERT INTO parties (id,name,type,opening_balance,phone) VALUES (?,?,?,?,?)",
-                                (p.get("id"), p.get("name"), p.get("type"),
-                                 p.get("opening_balance") or 0.0, p.get("phone") or ""))
+            for p in data.get("parties", []):
+                execute_query("INSERT INTO parties (id,name,type,opening_balance,phone) VALUES (?,?,?,?,?)",
+                              (p.get("id"), p.get("name"), p.get("type"),
+                               p.get("opening_balance") or 0.0, p.get("phone") or ""))
 
-                stock_cols = ["id", "entry_date", "item_type", "opening_stock", "rate", "opening_amount",
-                              "purchase_qty", "purchase_rate", "purchase_amount", "total_purchase_amount",
-                              "avg_rate", "available_stock", "sales_qty", "sales_rate", "sales_amount",
-                              "total_sales_amount", "closing_amount", "closing_stock", "dip_diff",
-                              "actual_stock", "actual_amount"]
-                for s in data.get("stock_register", []):
-                    cur.execute(
-                        f"INSERT INTO stock_register ({','.join(stock_cols)}) VALUES ({','.join('?' * len(stock_cols))})",
-                        tuple(s.get(c) for c in stock_cols))
+            stock_cols = ["id", "entry_date", "item_type", "opening_stock", "rate", "opening_amount",
+                          "purchase_qty", "purchase_rate", "purchase_amount", "total_purchase_amount",
+                          "avg_rate", "available_stock", "sales_qty", "sales_rate", "sales_amount",
+                          "total_sales_amount", "closing_amount", "closing_stock", "dip_diff",
+                          "actual_stock", "actual_amount"]
+            for s in data.get("stock_register", []):
+                execute_query(
+                    f"INSERT INTO stock_register ({','.join(stock_cols)}) VALUES ({','.join('?' * len(stock_cols))})",
+                    tuple(s.get(c) for c in stock_cols))
 
-                for l in data.get("ledger", []):
-                    cur.execute(
-                        """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                        (l.get("id"), l.get("txn_date"), l.get("party_name"), l.get("party_type"),
-                         l.get("item_type"), l.get("qty_ltrs", 0.0), l.get("rate", 0.0),
-                         l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
-                         l.get("voucher_no")))
+            for l in data.get("ledger", []):
+                execute_query(
+                    """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (l.get("id"), l.get("txn_date"), l.get("party_name"), l.get("party_type"),
+                     l.get("item_type"), l.get("qty_ltrs", 0.0), l.get("rate", 0.0),
+                     l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
+                     l.get("voucher_no")))
 
-                conn.commit()
-                if hasattr(conn, "sync"):
-                    conn.sync()
-            finally:
-                conn.close()
             st.success("✅ System restored successfully.")
             st.rerun()
