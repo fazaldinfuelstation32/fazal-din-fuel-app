@@ -1,13 +1,7 @@
 """
-FD CNG Fuel Station - Management App (Fixed & Improved)
-=======================================================
-Fixes in this version:
-1. No auto-save / no double-save  -> every save goes through a one-time token guard.
-2. Review (preview) screen before saving customer & vendor entries.
-3. Correct Dip Difference maths (keeps the minus/plus sign and applies it properly).
-4. Full Edit / Delete module (choose Customer or Vendor, then the exact entry).
-5. Sr. No. is always a clean 1,2,3... sequence; real DB IDs can be re-sequenced too.
-6. Extra helpers: search filters, CSV export, delete stock entry, duplicate warning.
+FD CNG Fuel Station - Management App (Turso Cloud Integrated)
+=============================================================
+Supports Turso Cloud Database via libsql with local fallback.
 
 Run:  streamlit run app.py
 """
@@ -21,6 +15,13 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+# Turso Client Import
+try:
+    import libsql_experimental as libsql
+    HAS_TURSO = True
+except ImportError:
+    HAS_TURSO = False
+
 # ==========================================
 # 1. PAGE CONFIG & THEME
 # ==========================================
@@ -31,8 +32,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Streamlit silently appends " · Streamlit" to the browser tab title, which then also
-# shows up in the browser's print header/footer. Force the real title so it never appears.
 components.html(
     """<script>
     (function () {
@@ -51,10 +50,7 @@ components.html(
 st.markdown(
     """
     <style>
-        /* ===== FD CNG Fuel Station Theme ===== */
         .main { background-color: #f4f7f5; }
-
-        /* Title banner - fuel pump green/orange gradient */
         .app-title {
             font-size: 26px; font-weight: 800; color: #ffffff;
             padding: 16px 22px; margin-bottom: 20px;
@@ -64,16 +60,12 @@ st.markdown(
             box-shadow: 0 3px 10px rgba(11,93,52,.25);
             letter-spacing: .3px;
         }
-
-        /* Sidebar styling */
         section[data-testid="stSidebar"] {
             background: linear-gradient(180deg, #0b3d24 0%, #14532d 100%);
         }
         section[data-testid="stSidebar"] * { color: #f0fdf4 !important; }
         section[data-testid="stSidebar"] .stRadio > label { color: #f0fdf4 !important; }
         section[data-testid="stSidebar"] hr { border-color: rgba(255,255,255,.2); }
-
-        /* Metric cards */
         .metric-card {
             background: #ffffff; border: 1px solid #e3e8ef; border-top: 4px solid #f57c00;
             border-radius: 12px; padding: 16px; text-align: center;
@@ -81,14 +73,10 @@ st.markdown(
         }
         .metric-card h4 { margin: 0; font-size: 13px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; }
         .metric-card p  { margin: 8px 0 0; font-size: 21px; font-weight: 800; color: #0b3d24; }
-
-        /* Review / preview box */
         .review-box {
             background:#fff7e6; border:1px solid #f57c00; border-left: 6px solid #f57c00;
             border-radius:10px; padding:14px; margin-bottom: 10px;
         }
-
-        /* Buttons */
         div.stButton > button, div.stFormSubmitButton > button, div.stDownloadButton > button {
             background: linear-gradient(90deg, #1c8b4e, #2e7d32);
             color: #ffffff; border: none; border-radius: 8px; font-weight: 700;
@@ -97,11 +85,7 @@ st.markdown(
         div.stButton > button:hover, div.stFormSubmitButton > button:hover, div.stDownloadButton > button:hover {
             background: linear-gradient(90deg, #f57c00, #ef6c00); color:#fff;
         }
-
-        /* Tabs */
         button[data-baseweb="tab"] { font-weight: 700; }
-
-        /* Dataframe header tint */
         [data-testid="stDataFrame"] { border: 1px solid #e3e8ef; border-radius: 8px; overflow: hidden; }
     </style>
     """,
@@ -143,12 +127,25 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # ==========================================
-# 3. DATABASE
+# 3. TURSO / SQLITE DATABASE SETUP
 # ==========================================
 DB_FILE = "fd_cng_fuel_station.db"
 
 
 def get_db_connection():
+    """Turso Cloud connection using secrets with fallback to local SQLite."""
+    turso_url = st.secrets.get("turso", {}).get("TURSO_DATABASE_URL")
+    turso_token = st.secrets.get("turso", {}).get("TURSO_AUTH_TOKEN")
+
+    if HAS_TURSO and turso_url and turso_token:
+        try:
+            conn = libsql.connect(DB_FILE, sync_url=turso_url, auth_token=turso_token)
+            conn.sync()
+            return conn
+        except Exception as e:
+            st.error(f"⚠️ Turso Sync Error: {e}. Falling back to local SQLite.")
+
+    # Fallback to local SQLite
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -157,125 +154,121 @@ def get_db_connection():
 
 def init_db():
     conn = get_db_connection()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS parties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                type TEXT CHECK(type IN ('Customer','Vendor')) NOT NULL,
+                opening_balance REAL DEFAULT 0.0,
+                phone TEXT
+            )"""
+        )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS parties (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE NOT NULL,
-            type TEXT CHECK(type IN ('Customer','Vendor')) NOT NULL,
-            opening_balance REAL DEFAULT 0.0,
-            phone TEXT
-        )"""
-    )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_register (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_date TEXT NOT NULL,
+                item_type TEXT CHECK(item_type IN ('Petrol','Diesel')) NOT NULL,
+                opening_stock REAL DEFAULT 0.0,
+                rate REAL DEFAULT 0.0,
+                opening_amount REAL DEFAULT 0.0,
+                purchase_qty REAL DEFAULT 0.0,
+                purchase_rate REAL DEFAULT 0.0,
+                purchase_amount REAL DEFAULT 0.0,
+                total_purchase_amount REAL DEFAULT 0.0,
+                avg_rate REAL DEFAULT 0.0,
+                available_stock REAL DEFAULT 0.0,
+                sales_qty REAL DEFAULT 0.0,
+                sales_rate REAL DEFAULT 0.0,
+                sales_amount REAL DEFAULT 0.0,
+                total_sales_amount REAL DEFAULT 0.0,
+                closing_amount REAL DEFAULT 0.0,
+                closing_stock REAL DEFAULT 0.0,
+                dip_diff REAL DEFAULT 0.0,
+                actual_stock REAL DEFAULT 0.0,
+                actual_amount REAL DEFAULT 0.0
+            )"""
+        )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS stock_register (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_date TEXT NOT NULL,
-            item_type TEXT CHECK(item_type IN ('Petrol','Diesel')) NOT NULL,
-            opening_stock REAL DEFAULT 0.0,
-            rate REAL DEFAULT 0.0,
-            opening_amount REAL DEFAULT 0.0,
-            purchase_qty REAL DEFAULT 0.0,
-            purchase_rate REAL DEFAULT 0.0,
-            purchase_amount REAL DEFAULT 0.0,
-            total_purchase_amount REAL DEFAULT 0.0,
-            avg_rate REAL DEFAULT 0.0,
-            available_stock REAL DEFAULT 0.0,
-            sales_qty REAL DEFAULT 0.0,
-            sales_rate REAL DEFAULT 0.0,
-            sales_amount REAL DEFAULT 0.0,
-            total_sales_amount REAL DEFAULT 0.0,
-            closing_amount REAL DEFAULT 0.0,
-            closing_stock REAL DEFAULT 0.0,
-            dip_diff REAL DEFAULT 0.0,
-            actual_stock REAL DEFAULT 0.0,
-            actual_amount REAL DEFAULT 0.0
-        )"""
-    )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                txn_date TEXT NOT NULL,
+                party_name TEXT NOT NULL,
+                party_type TEXT CHECK(party_type IN ('Customer','Vendor')) NOT NULL,
+                item_type TEXT,
+                qty_ltrs REAL DEFAULT 0.0,
+                rate REAL DEFAULT 0.0,
+                debit REAL DEFAULT 0.0,
+                credit REAL DEFAULT 0.0,
+                description TEXT,
+                voucher_no TEXT
+            )"""
+        )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ledger (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            txn_date TEXT NOT NULL,
-            party_name TEXT NOT NULL,
-            party_type TEXT CHECK(party_type IN ('Customer','Vendor')) NOT NULL,
-            item_type TEXT,
-            qty_ltrs REAL DEFAULT 0.0,
-            rate REAL DEFAULT 0.0,
-            debit REAL DEFAULT 0.0,
-            credit REAL DEFAULT 0.0,
-            description TEXT,
-            voucher_no TEXT
-        )"""
-    )
+        existing_cols = [r[1] for r in cur.execute("PRAGMA table_info(ledger)").fetchall()]
+        if "voucher_no" not in existing_cols:
+            cur.execute("ALTER TABLE ledger ADD COLUMN voucher_no TEXT")
 
-    # --- Migration: add voucher_no column if an older DB file already exists without it ---
-    existing_cols = [r[1] for r in cur.execute("PRAGMA table_info(ledger)").fetchall()]
-    if "voucher_no" not in existing_cols:
-        cur.execute("ALTER TABLE ledger ADD COLUMN voucher_no TEXT")
+        total_parties = cur.execute("SELECT COUNT(*) c FROM parties").fetchone()[0]
 
-    total_parties = cur.execute("SELECT COUNT(*) c FROM parties").fetchone()["c"]
+        if total_parties == 0:
+            default_customers = [
+                "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
+                "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
+                "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
+                "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
+                "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
+                "Nadeem Cashier (Cash Sale)",
+            ]
+            default_vendors = [
+                "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
+                "Crown Pso", "Ittifaq Petroleum",
+            ]
 
-    if total_parties == 0:
-        # Only seed the starter list on a brand-new, empty database. If we checked this
-        # on every rerun instead, deleting a default party (e.g. "26/d Form") would make
-        # it silently reappear on the very next page interaction.
-        default_customers = [
-            "Baba Farid Sugar Mill", "Jalal Din", "Fojdari", "Nemat Mill",
-            "Feed Mill", "Fatima Mill", "Ravi Rice", "R.J 39D", "Malika Rice",
-            "Cadet College", "26/d Form", "Ravi Trader(Atiq Sb)", "AK Trader",
-            "Siddique Zarai Form", "Zia ur Rehman", "Arshad Protein", "27 Murabba",
-            "Aleem Khan", "Umer Sb", "M Transport", "Sheraz+Shafqat",
-            "Nadeem Cashier (Cash Sale)",
-        ]
-        default_vendors = [
-            "Zoom Petroleum", "Mohaib(Sharoz)", "Pervaiz Petroleum",
-            "Crown Pso", "Ittifaq Petroleum",
-        ]
+            for c in default_customers:
+                cur.execute(
+                    "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Customer', 0.0, '')",
+                    (c,),
+                )
+            for v in default_vendors:
+                cur.execute(
+                    "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')",
+                    (v,),
+                )
 
-        for c in default_customers:
-            cur.execute(
-                "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Customer', 0.0, '')",
-                (c,),
-            )
-        for v in default_vendors:
-            cur.execute(
-                "INSERT INTO parties (name, type, opening_balance, phone) VALUES (?, 'Vendor', 0.0, '')",
-                (v,),
-            )
-
-    conn.commit()
-    conn.close()
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+    finally:
+        conn.close()
 
 
 init_db()
 
 
 # ==========================================
-# 4. HELPERS
+# 4. HELPER FUNCTIONS
 # ==========================================
 def sr_index(df: pd.DataFrame) -> pd.DataFrame:
-    """Always show a clean 1,2,3... Sr. No."""
     if df is None or df.empty:
         return df
-    df = df.reset_index(drop=True)
-    df.index = range(1, len(df) + 1)
-    df.index.name = "Sr. No."
-    return df
+    res = df.copy().reset_index(drop=True)
+    res.index = range(1, len(res) + 1)
+    res.index.name = "Sr. No."
+    return res
 
 
 def payload_token(*parts) -> str:
-    """Unique fingerprint of a save payload -> blocks duplicate / repeat saves."""
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
 
 def already_saved(token: str) -> bool:
-    """True if this exact payload was saved in this session already."""
     saved = st.session_state.setdefault("saved_tokens", set())
     if token in saved:
         return True
@@ -285,27 +278,31 @@ def already_saved(token: str) -> bool:
 
 def fetch_parties(p_type=None) -> pd.DataFrame:
     conn = get_db_connection()
-    base = ("SELECT id, name AS [Party Name], type AS [Type], "
-            "opening_balance AS [Opening Balance], phone AS [Phone] FROM parties ")
-    if p_type:
-        df = pd.read_sql_query(base + "WHERE type = ? ORDER BY name ASC", conn, params=(p_type,))
-    else:
-        df = pd.read_sql_query(base + "ORDER BY type ASC, name ASC", conn)
-    conn.close()
+    try:
+        base = ("SELECT id, name AS [Party Name], type AS [Type], "
+                "opening_balance AS [Opening Balance], phone AS [Phone] FROM parties ")
+        if p_type:
+            df = pd.read_sql_query(base + "WHERE type = ? ORDER BY name ASC", conn, params=(p_type,))
+        else:
+            df = pd.read_sql_query(base + "ORDER BY type ASC, name ASC", conn)
+    finally:
+        conn.close()
     return df
 
 
 def calculate_party_balances(party_type: str) -> pd.DataFrame:
     conn = get_db_connection()
-    parties = pd.read_sql_query(
-        "SELECT name, opening_balance FROM parties WHERE type = ?", conn, params=(party_type,)
-    )
-    ledger = pd.read_sql_query(
-        "SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", conn, params=(party_type,)
-    )
-    conn.close()
-    parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
+    try:
+        parties = pd.read_sql_query(
+            "SELECT name, opening_balance FROM parties WHERE type = ?", conn, params=(party_type,)
+        )
+        ledger = pd.read_sql_query(
+            "SELECT party_name, debit, credit FROM ledger WHERE party_type = ?", conn, params=(party_type,)
+        )
+    finally:
+        conn.close()
 
+    parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
     rows = []
     for _, p in parties.iterrows():
         pl = ledger[ledger["party_name"] == p["name"]]
@@ -319,24 +316,29 @@ def calculate_party_balances(party_type: str) -> pd.DataFrame:
 
 
 def resequence_ids(table: str):
-    """Re-number the id column as 1,2,3... ordered by date then old id."""
     date_col = "txn_date" if table == "ledger" else "entry_date"
     conn = get_db_connection()
-    cur = conn.cursor()
-    ids = [r[0] for r in cur.execute(f"SELECT id FROM {table} ORDER BY {date_col} ASC, id ASC")]
-    # move out of the way first to avoid PK clashes
-    for old in ids:
-        cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
-    for new, old in enumerate(ids, start=1):
-        cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
-    cur.execute(f"UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (len(ids), table))
-    conn.commit()
-    conn.close()
+    try:
+        cur = conn.cursor()
+        ids = [r[0] for r in cur.execute(f"SELECT id FROM {table} ORDER BY {date_col} ASC, id ASC")]
+        for old in ids:
+            cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
+        for new, old in enumerate(ids, start=1):
+            cur.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
+        
+        seq_exists = cur.execute("SELECT COUNT(*) FROM sqlite_sequence WHERE name = ?", (table,)).fetchone()[0]
+        if seq_exists:
+            cur.execute("UPDATE sqlite_sequence SET seq = ? WHERE name = ?", (len(ids), table))
+        else:
+            cur.execute("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)", (len(ids), table))
+        conn.commit()
+        if hasattr(conn, "sync"):
+            conn.sync()
+    finally:
+        conn.close()
 
 
 def blank_number(label: str, min_value=None, help=None, key=None) -> float:
-    """A number field that starts EMPTY instead of pre-filled with 0.00, so the user can
-    type the quantity/rate/payment straight away without clearing anything first."""
     raw = st.text_input(label, value="", placeholder="0", help=help, key=key)
     raw = (raw or "").strip()
     if raw == "":
@@ -353,16 +355,16 @@ def blank_number(label: str, min_value=None, help=None, key=None) -> float:
 
 
 def opening_balance_now(party_name: str, party_type: str) -> float:
-    """Party's current running balance (their master Opening Balance from Master Setup
-    plus every ledger transaction so far) — i.e. the balance BEFORE a brand-new entry."""
     conn = get_db_connection()
-    ob_row = conn.execute("SELECT opening_balance FROM parties WHERE name=? AND type=?",
-                          (party_name, party_type)).fetchone()
-    base = (ob_row["opening_balance"] if ob_row else 0.0) or 0.0
-    row = conn.execute("SELECT SUM(debit) d, SUM(credit) c FROM ledger WHERE party_name=? AND party_type=?",
-                       (party_name, party_type)).fetchone()
-    conn.close()
-    d, c = (row["d"] or 0.0), (row["c"] or 0.0)
+    try:
+        ob_row = conn.execute("SELECT opening_balance FROM parties WHERE name=? AND type=?",
+                              (party_name, party_type)).fetchone()
+        base = (ob_row["opening_balance"] if ob_row else 0.0) or 0.0
+        row = conn.execute("SELECT SUM(debit) d, SUM(credit) c FROM ledger WHERE party_name=? AND party_type=?",
+                           (party_name, party_type)).fetchone()
+    finally:
+        conn.close()
+    d, c = (row["d"] or 0.0) if row else 0.0, (row["c"] or 0.0) if row else 0.0
     return base + ((d - c) if party_type == "Customer" else (c - d))
 
 
@@ -373,27 +375,25 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
 
 
 def last_closing_stock(item_type: str) -> float:
-    """Fetch the FINAL closing stock (book closing stock adjusted by that day's
-    dip difference) from the most recent saved stock-register entry for this
-    fuel item. This is the correct value to carry forward as tomorrow's
-    Opening Stock — NOT the raw dip reading and NOT the book closing alone."""
     conn = get_db_connection()
-    row = conn.execute(
-        """SELECT closing_stock, dip_diff FROM stock_register
-           WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
-        (item_type,)).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            """SELECT closing_stock, dip_diff FROM stock_register
+               WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
+            (item_type,)).fetchone()
+    finally:
+        conn.close()
     if row is None:
         return 0.0
     return (row["closing_stock"] or 0.0) + (row["dip_diff"] or 0.0)
 
 
 def next_voucher_no() -> str:
-    """Suggest the next voucher number as V-00001, V-00002 ... based on the highest
-    numeric part already used (so it stays correct even after deletes)."""
     conn = get_db_connection()
-    rows = conn.execute("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL").fetchall()
+    finally:
+        conn.close()
     max_n = 0
     for r in rows:
         digits = "".join(ch for ch in (r["voucher_no"] or "") if ch.isdigit())
@@ -403,7 +403,6 @@ def next_voucher_no() -> str:
 
 
 def fmt_ddmmyyyy(d) -> str:
-    """Convert any date-ish value (date object or 'YYYY-MM-DD' string) to DD-MM-YYYY for display."""
     try:
         return pd.to_datetime(d).strftime("%d-%m-%Y")
     except Exception:
@@ -412,27 +411,25 @@ def fmt_ddmmyyyy(d) -> str:
 
 def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: float,
                             stmt: pd.DataFrame, from_date, to_date):
-    """Builds a print-friendly HTML statement. The print button opens the statement in a
-    brand-new blank browser window (NOT the Streamlit app page) and prints straight from
-    there. This keeps the Streamlit app's own web link/title off the printed page — only
-    the station name and statement show up, nothing else."""
-
     from_str = fmt_ddmmyyyy(from_date)
     to_str = fmt_ddmmyyyy(to_date)
 
     rows_html = ""
     for i, (_, r) in enumerate(stmt.iterrows(), start=1):
+        fuel_val = r['Fuel'] if pd.notna(r['Fuel']) else '-'
+        v_num = r['Voucher No'] if pd.notna(r.get('Voucher No')) else ''
+        desc = r['Description'] or ''
         rows_html += f"""
         <tr>
             <td>{i}</td>
-            <td>{r['Voucher No'] if pd.notna(r.get('Voucher No')) else ''}</td>
+            <td>{v_num}</td>
             <td>{fmt_ddmmyyyy(r['Date'])}</td>
-            <td>{r['Fuel'] if pd.notna(r['Fuel']) else '-'}</td>
+            <td>{fuel_val}</td>
             <td class="num">{r['Ltrs']:,.2f}</td>
             <td class="num">{r['Rate']:,.2f}</td>
             <td class="num">{r['Debit']:,.2f}</td>
             <td class="num">{r['Credit']:,.2f}</td>
-            <td>{r['Description'] or ''}</td>
+            <td>{desc}</td>
             <td class="num">{r['Running Balance']:,.2f}</td>
         </tr>"""
 
@@ -502,8 +499,6 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
     </html>
     """
 
-    # Embed the printable document as a JS string literal for the trigger button below.
-    # "</script>" inside it is escaped so the OUTER <script> block doesn't get closed early.
     safe_doc = json.dumps(print_doc).replace("</script>", "<\\/script>")
 
     trigger_html = f"""
@@ -527,9 +522,17 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
 
 
 # ==========================================
-# 5. SIDEBAR
+# 5. SIDEBAR NAVIGATION
 # ==========================================
 st.sidebar.markdown("## ⛽ FD CNG Station")
+
+# Turso Status Indicator
+turso_configured = bool(st.secrets.get("turso", {}).get("TURSO_DATABASE_URL"))
+if turso_configured and HAS_TURSO:
+    st.sidebar.success("☁️ Turso Cloud: Connected")
+else:
+    st.sidebar.warning("📁 Local SQLite Mode")
+
 st.sidebar.markdown("---")
 
 module = st.sidebar.radio(
@@ -564,10 +567,12 @@ if module == "📊 Dashboard & Monthly Analytics":
     payables = vend_df["Net Balance"].sum() if not vend_df.empty else 0.0
 
     conn = get_db_connection()
-    fuel = pd.read_sql_query(
-        "SELECT item_type, SUM(qty_ltrs) total FROM ledger "
-        "WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type", conn)
-    conn.close()
+    try:
+        fuel = pd.read_sql_query(
+            "SELECT item_type, SUM(qty_ltrs) total FROM ledger "
+            "WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type", conn)
+    finally:
+        conn.close()
 
     petrol = fuel.loc[fuel["item_type"] == "Petrol", "total"].sum() if not fuel.empty else 0.0
     diesel = fuel.loc[fuel["item_type"] == "Diesel", "total"].sum() if not fuel.empty else 0.0
@@ -583,13 +588,15 @@ if module == "📊 Dashboard & Monthly Analytics":
 
     st.markdown("### 📊 Multi-Month Party Sales Summary")
     conn = get_db_connection()
-    matrix = pd.read_sql_query(
-        """SELECT party_name AS [Party Name], strftime('%Y-%m', txn_date) AS Month,
-                  item_type AS [Fuel Item], SUM(debit) AS [Total Amount]
-           FROM ledger
-           WHERE party_type='Customer' AND item_type IN ('Petrol','Diesel')
-           GROUP BY party_name, Month, item_type""", conn)
-    conn.close()
+    try:
+        matrix = pd.read_sql_query(
+            """SELECT party_name AS [Party Name], strftime('%Y-%m', txn_date) AS Month,
+                      item_type AS [Fuel Item], SUM(debit) AS [Total Amount]
+               FROM ledger
+               WHERE party_type='Customer' AND item_type IN ('Petrol','Diesel')
+               GROUP BY party_name, Month, item_type""", conn)
+    finally:
+        conn.close()
 
     if not matrix.empty:
         pivot = matrix.pivot_table(index="Party Name", columns=["Month", "Fuel Item"],
@@ -616,27 +623,27 @@ elif module == "📅 Daily Credit Sale & Day Totals":
     month = st.text_input("Filter Month (YYYY-MM)", value=date.today().strftime("%Y-%m"))
 
     conn = get_db_connection()
-    daily = pd.read_sql_query(
-        """SELECT txn_date AS Date, party_name AS [Party Name],
-                  SUM(CASE WHEN item_type='Petrol' THEN debit ELSE 0 END) AS Petrol,
-                  SUM(CASE WHEN item_type='Diesel' THEN debit ELSE 0 END) AS Diesel,
-                  SUM(credit) AS [Payment Received],
-                  SUM(debit)  AS [Credit Total]
-           FROM ledger
-           WHERE party_type='Customer' AND strftime('%Y-%m', txn_date) = ?
-           GROUP BY txn_date, party_name
-           ORDER BY txn_date ASC, party_name ASC""", conn, params=(month,))
+    try:
+        daily = pd.read_sql_query(
+            """SELECT txn_date AS Date, party_name AS [Party Name],
+                      SUM(CASE WHEN item_type='Petrol' THEN debit ELSE 0 END) AS Petrol,
+                      SUM(CASE WHEN item_type='Diesel' THEN debit ELSE 0 END) AS Diesel,
+                      SUM(credit) AS [Payment Received],
+                      SUM(debit)  AS [Credit Total]
+               FROM ledger
+               WHERE party_type='Customer' AND strftime('%Y-%m', txn_date) = ?
+               GROUP BY txn_date, party_name
+               ORDER BY txn_date ASC, party_name ASC""", conn, params=(month,))
 
-    # --- Opening / Closing Balance per party per day (includes each party's master
-    # Opening Balance from Master Setup + every ledger transaction before that day) ---
-    parties_ob = pd.read_sql_query(
-        "SELECT name AS [Party Name], opening_balance AS MasterOpening FROM parties WHERE type='Customer'", conn)
-    full_hist = pd.read_sql_query(
-        """SELECT party_name AS [Party Name], txn_date AS Date,
-                  SUM(debit) AS DebitDay, SUM(credit) AS CreditDay
-           FROM ledger WHERE party_type='Customer'
-           GROUP BY party_name, txn_date ORDER BY party_name, txn_date""", conn)
-    conn.close()
+        parties_ob = pd.read_sql_query(
+            "SELECT name AS [Party Name], opening_balance AS MasterOpening FROM parties WHERE type='Customer'", conn)
+        full_hist = pd.read_sql_query(
+            """SELECT party_name AS [Party Name], txn_date AS Date,
+                      SUM(debit) AS DebitDay, SUM(credit) AS CreditDay
+               FROM ledger WHERE party_type='Customer'
+               GROUP BY party_name, txn_date ORDER BY party_name, txn_date""", conn)
+    finally:
+        conn.close()
 
     if not daily.empty:
         full_hist = full_hist.merge(parties_ob, on="Party Name", how="left")
@@ -687,15 +694,17 @@ elif module == "📄 Customer/Vendor Statements & Print":
 
     if party != "None":
         conn = get_db_connection()
-        row = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party,)).fetchone()
-        op_bal = (row["opening_balance"] if row else 0.0) or 0.0
-        stmt = pd.read_sql_query(
-            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
-                      qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
-               FROM ledger WHERE party_name = ? AND txn_date BETWEEN ? AND ?
-               ORDER BY txn_date ASC, id ASC""",
-            conn, params=(party, str(from_date), str(to_date)))
-        conn.close()
+        try:
+            row = conn.execute("SELECT opening_balance FROM parties WHERE name = ?", (party,)).fetchone()
+            op_bal = (row["opening_balance"] if row else 0.0) or 0.0
+            stmt = pd.read_sql_query(
+                """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, item_type AS Fuel,
+                          qty_ltrs AS Ltrs, rate AS Rate, debit AS Debit, credit AS Credit, description AS Description
+                   FROM ledger WHERE party_name = ? AND txn_date BETWEEN ? AND ?
+                   ORDER BY txn_date ASC, id ASC""",
+                conn, params=(party, str(from_date), str(to_date)))
+        finally:
+            conn.close()
 
         bal, rows = op_bal, []
         for _, r in stmt.iterrows():
@@ -708,8 +717,6 @@ elif module == "📄 Customer/Vendor Statements & Print":
                 f"{to_date.strftime('%d-%m-%Y')} | Opening Balance: Rs. {op_bal:,.2f} | "
                 f"Closing Balance: Rs. {closing_bal:,.2f}")
 
-        # Display copy only — dates shown as DD-MM-YYYY. The original 'stmt' (ISO dates)
-        # is kept as-is and passed to the printable statement below.
         stmt_display = stmt.copy()
         stmt_display["Date"] = stmt_display["Date"].apply(fmt_ddmmyyyy)
         stmt_view = sr_index(stmt_display)
@@ -717,26 +724,20 @@ elif module == "📄 Customer/Vendor Statements & Print":
         download_csv(stmt_view, f"{party}_statement.csv", "⬇️ Download CSV")
 
         st.markdown("### 🖨️ Print Statement")
-        st.caption("Click the green button below and use the browser's print dialog to send this "
-                   "statement straight to your printer — no need to save a file first.")
+        st.caption("Click the green button below and use the browser's print dialog to send this statement straight to your printer.")
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER  (dip difference fixed)
+# MODULE 4: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
 
-    st.caption("Dip Difference = the shortage/excess amount YOU enter directly during the physical "
-               "dip check (not the full tank reading). Minus means shortage (stock kam), plus means "
-               "excess (stock zyada). The **Final Closing Stock** (book closing adjusted by that "
-               "difference) is what carries forward as tomorrow's Opening Stock — auto-filled below.")
+    st.caption("Dip Difference = Shortage/Excess amount entered during physical dip check. Minus means shortage, plus means excess.")
 
-    item_type = st.selectbox("Fuel Item (select first — Opening Stock auto-fills from this)",
-                             ["Petrol", "Diesel"], key="stock_item_type_pick")
+    item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
     suggested_opening = last_closing_stock(item_type)
-    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = last saved Final Closing Stock "
-               f"({suggested_opening:,.2f} Ltrs). You can still edit it below if needed.")
+    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = last saved Final Closing Stock ({suggested_opening:,.2f} Ltrs).")
 
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
@@ -752,11 +753,7 @@ elif module == "🛢️ Daily Stock Register":
             s_rate = blank_number("Sales Rate", min_value=0.0)
         with c3:
             dip_checked = st.checkbox("Physical Dip Check done today?", value=True)
-            dip_input = blank_number(
-                "Dip Shortage / Excess (+/− Ltrs)",
-                help="Enter ONLY the difference found in the physical dip check — e.g. type -93 "
-                     "if 93 litres are SHORT, or 50 if 50 litres are EXCESS. Do NOT type the full "
-                     "tank reading here; the app adds/subtracts this from the Book Closing Stock.")
+            dip_input = blank_number("Dip Shortage / Excess (+/− Ltrs)")
 
         review_stock = st.form_submit_button("👁️ Review Entry")
 
@@ -769,12 +766,12 @@ elif module == "🛢️ Daily Stock Register":
         s_amount = s_qty * s_rate
         tot_s_amount = s_qty * avg_rate
         closing_amount = tot_p_amount - tot_s_amount
-        closing_stock = avail - s_qty                    # book closing stock (before dip adjustment)
-        dip_diff = dip_input if dip_checked else 0.0      # signed: minus = shortage, plus = excess
-        dip_amount = dip_diff * avg_rate                  # same sign as dip_diff
-        actual_stock = closing_stock + dip_diff           # real litres in tank after adjustment
+        closing_stock = avail - s_qty
+        dip_diff = dip_input if dip_checked else 0.0
+        dip_amount = dip_diff * avg_rate
+        actual_stock = closing_stock + dip_diff
         act_amount = actual_stock * avg_rate
-        final_closing = closing_stock + dip_diff          # <-- carried forward as next day's Opening Stock
+        final_closing = closing_stock + dip_diff
         return dict(op_amount=op_amount, p_amount=p_amount, tot_p_amount=tot_p_amount,
                     avail=avail, avg_rate=avg_rate, s_amount=s_amount, tot_s_amount=tot_s_amount,
                     closing_amount=closing_amount, closing_stock=closing_stock,
@@ -799,19 +796,19 @@ elif module == "🛢️ Daily Stock Register":
         r1.write(f"**Available Stock:** {k['avail']:,.2f} Ltrs")
         r2.write(f"**Average Rate:** Rs. {k['avg_rate']:,.4f}")
         r2.write(f"**Book Closing Stock:** {k['closing_stock']:,.2f} Ltrs")
-        r2.write(f"**Actual Dip Stock (after adjustment):** {k['actual_stock']:,.2f} Ltrs"
-                 + ("" if pend["dip_checked"] else " (no dip taken)"))
+        r2.write(f"**Actual Dip Stock:** {k['actual_stock']:,.2f} Ltrs")
         sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
         r3.write(f"**Dip Difference:** {k['dip_diff']:+,.2f} Ltrs  → {sign}")
         r3.write(f"**Dip Diff Amount:** Rs. {k['dip_amount']:+,.2f}")
         r3.write(f"**Closing Amount:** Rs. {k['closing_amount']:,.2f}")
-        st.success(f"**✅ Final Closing Stock (→ tomorrow's Opening Stock for {pend['item_type']}): "
-                   f"{k['final_closing']:,.2f} Ltrs**")
 
         conn = get_db_connection()
-        dup = conn.execute("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
-                           (pend["e_date"], pend["item_type"])).fetchone()["c"]
-        conn.close()
+        try:
+            dup = conn.execute("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
+                               (pend["e_date"], pend["item_type"])).fetchone()["c"]
+        finally:
+            conn.close()
+            
         if dup:
             st.warning(f"⚠️ {dup} entry already exists for {pend['e_date']} / {pend['item_type']}.")
 
@@ -829,35 +826,41 @@ elif module == "🛢️ Daily Stock Register":
                 st.warning("This entry was already saved. Duplicate save blocked.")
             else:
                 conn = get_db_connection()
-                conn.execute(
-                    """INSERT INTO stock_register (
-                        entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
-                        purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
-                        sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
-                     pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
-                     k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
-                     k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
-                )
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute(
+                        """INSERT INTO stock_register (
+                            entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
+                            purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
+                            sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
+                         pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
+                         k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
+                         k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
+                    )
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 st.session_state.pop("stock_pending", None)
                 st.success("✅ Daily stock entry saved.")
                 st.rerun()
 
     st.markdown("### 📊 Existing Stock Records")
     conn = get_db_connection()
-    stock_df = pd.read_sql_query(
-        """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
-                  opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
-                  purchase_rate AS [Purchase Rate], sales_qty AS [Sales Qty], sales_rate AS [Sales Rate],
-                  avg_rate AS [Avg Rate], closing_stock AS [Closing Stock],
-                  actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
-                  ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
-                  ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
-           FROM stock_register ORDER BY entry_date DESC, id DESC""", conn)
-    conn.close()
+    try:
+        stock_df = pd.read_sql_query(
+            """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
+                      opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
+                      purchase_rate AS [Purchase Rate], sales_qty AS [Sales Qty], sales_rate AS [Sales Rate],
+                      avg_rate AS [Avg Rate], closing_stock AS [Closing Stock],
+                      actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
+                      ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
+                      ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
+               FROM stock_register ORDER BY entry_date DESC, id DESC""", conn)
+    finally:
+        conn.close()
 
     if not stock_df.empty:
         stock_df["Dip Status"] = stock_df["Dip Difference"].apply(
@@ -870,9 +873,13 @@ elif module == "🛢️ Daily Stock Register":
         del_id = st.selectbox("Select Entry ID to delete", ids)
         if st.button("Delete Selected Stock Entry"):
             conn = get_db_connection()
-            conn.execute("DELETE FROM stock_register WHERE id = ?", (int(del_id),))
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute("DELETE FROM stock_register WHERE id = ?", (int(del_id),))
+                conn.commit()
+                if hasattr(conn, "sync"):
+                    conn.sync()
+            finally:
+                conn.close()
             resequence_ids("stock_register")
             st.success("Entry deleted and IDs re-sequenced.")
             st.rerun()
@@ -880,9 +887,7 @@ elif module == "🛢️ Daily Stock Register":
         st.info("No stock records yet.")
 
 # ==========================================
-# MODULE 5: CUSTOMER ENTRY — Fuel Sale (Cash In/Debit) & Payment Received (Cash Out/Credit)
-# kept as clearly separate entry types so an advance/payment received from a customer, and
-# the actual fuel sale entered on a different day, never get mixed up.
+# MODULE 5: CUSTOMER ENTRY
 # ==========================================
 elif module == "💳 Party Daily Sale & Credit Entry":
     title("Customer Credit Sale & Voucher Entry")
@@ -899,15 +904,6 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         ],
         key="cust_entry_kind",
     )
-
-    if entry_kind.startswith("🧾"):
-        st.caption("Fuel actually given to the customer. Enter the date the fuel was sold/delivered "
-                   "— this correctly adds to the customer's receivable.")
-    elif entry_kind.startswith("💵"):
-        st.caption("Payment/advance received from the customer (before or after a sale). Enter the date "
-                   "you actually **received the cash** — this correctly reduces the customer's receivable.")
-    else:
-        st.caption("Only use this when the fuel sale and its payment both happen on the same day.")
 
     with st.form("credit_sale_form"):
         c1, c2 = st.columns(2)
@@ -932,7 +928,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                 desc = st.text_input("Description / Slip No.")
             fuel = "Cash Payment/Voucher"
             qty, rate = 0.0, 0.0
-        else:  # Combined
+        else:
             with c1:
                 txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY")
                 party_name = st.selectbox("Customer Name", customers if customers else ["None"])
@@ -977,50 +973,50 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
                 conn = get_db_connection()
-                conn.execute(
-                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                       VALUES (?,?,'Customer',?,?,?,?,?,?,?)""",
-                    (pend["txn_date"], pend["party_name"],
-                     None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
-                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute(
+                        """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                           VALUES (?,?,'Customer',?,?,?,?,?,?,?)""",
+                        (pend["txn_date"], pend["party_name"],
+                         None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
+                         pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 st.session_state.pop("cust_pending", None)
                 st.success("✅ Customer transaction saved.")
                 st.rerun()
 
     st.markdown("### 🕒 Last 10 Customer Entries")
     conn = get_db_connection()
-    recent = pd.read_sql_query(
-        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
-                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
-                  debit AS [Sale — Cash In], credit AS [Received — Cash Out],
-                  description AS Description
-           FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""", conn)
-    conn.close()
+    try:
+        recent = pd.read_sql_query(
+            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Customer,
+                      item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                      debit AS [Sale — Cash In], credit AS [Received — Cash Out],
+                      description AS Description
+               FROM ledger WHERE party_type='Customer' ORDER BY id DESC LIMIT 10""", conn)
+    finally:
+        conn.close()
+
     if not recent.empty:
         recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
-        recent["Entry Type"] = recent.apply(
-            lambda r: "🧾 Sale" if (r["Sale — Cash In"] or 0) > 0 and (r["Received — Cash Out"] or 0) == 0
-            else ("💵 Payment" if (r["Received — Cash Out"] or 0) > 0 and (r["Sale — Cash In"] or 0) == 0
-                  else "🔄 Combined"), axis=1)
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
-# MODULE 6: VENDOR ENTRY — Purchase (Cash In/Credit) & Advance Payment (Cash Out/Debit)
-# kept as clearly separate entry types so an advance paid before the fuel arrives, and
-# the actual purchase entered later on the tanker-unload date, never get mixed up.
+# MODULE 6: VENDOR ENTRY
 # ==========================================
 elif module == "🚛 Vendor Purchasing & Dip Stock":
     title("Vendor Purchasing & Payments")
 
     vendors = fetch_parties("Vendor")["Party Name"].tolist()
 
-    vendor_name = st.selectbox("Vendor Name (select first — Opening Balance shows below)",
-                               vendors if vendors else ["None"], key="vend_pick")
+    vendor_name = st.selectbox("Vendor Name", vendors if vendors else ["None"], key="vend_pick")
     if vendor_name != "None":
         ob = opening_balance_now(vendor_name, "Vendor")
-        st.info(f"**Opening Balance for {vendor_name} (before this entry):** Rs. {ob:,.2f}")
+        st.info(f"**Opening Balance for {vendor_name}:** Rs. {ob:,.2f}")
 
     st.markdown("#### 1️⃣ Choose Entry Type")
     entry_kind = st.radio(
@@ -1032,16 +1028,6 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         ],
         key="vend_entry_kind",
     )
-
-    if entry_kind.startswith("🚛"):
-        st.caption("Fuel actually received. Enter the date the **tanker unloads / bill is received** "
-                   "(not the earlier advance-payment date) — this correctly adds to the vendor's payable.")
-    elif entry_kind.startswith("💵"):
-        st.caption("An advance paid BEFORE the fuel arrives (or any direct payment). Enter the date you "
-                   "actually **paid the cash** — this correctly reduces the vendor's payable. The matching "
-                   "purchase entry should be added separately later, dated on the tanker-unload day.")
-    else:
-        st.caption("Only use this when the purchase and its payment both happen on the same day.")
 
     with st.form("vendor_form"):
         c1, c2 = st.columns(2)
@@ -1061,10 +1047,10 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                 voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
             with c2:
                 paid = blank_number("Advance / Payment Paid (Rs.)", min_value=0.0)
-                desc = st.text_input("Description (e.g. Advance for tanker booking)")
+                desc = st.text_input("Description")
             fuel = "Direct Payment"
             qty, rate = 0.0, 0.0
-        else:  # Combined
+        else:
             with c1:
                 txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY")
                 fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
@@ -1108,33 +1094,36 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                 st.warning("This transaction was already saved. Duplicate save blocked.")
             else:
                 conn = get_db_connection()
-                conn.execute(
-                    """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                       VALUES (?,?,'Vendor',?,?,?,?,?,?,?)""",
-                    (pend["txn_date"], pend["vendor_name"],
-                     None if pend["fuel"] == "Direct Payment" else pend["fuel"],
-                     pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute(
+                        """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                           VALUES (?,?,'Vendor',?,?,?,?,?,?,?)""",
+                        (pend["txn_date"], pend["vendor_name"],
+                         None if pend["fuel"] == "Direct Payment" else pend["fuel"],
+                         pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 st.session_state.pop("vend_pending", None)
                 st.success("✅ Vendor transaction saved.")
                 st.rerun()
 
     st.markdown("### 🕒 Last 10 Vendor Entries")
     conn = get_db_connection()
-    recent = pd.read_sql_query(
-        """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
-                  item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
-                  debit AS [Paid — Cash Out], credit AS [Purchase — Cash In],
-                  description AS Description
-           FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""", conn)
-    conn.close()
+    try:
+        recent = pd.read_sql_query(
+            """SELECT id AS [Entry ID], voucher_no AS [Voucher No], txn_date AS Date, party_name AS Vendor,
+                      item_type AS Fuel, qty_ltrs AS Ltrs, rate AS Rate,
+                      debit AS [Paid — Cash Out], credit AS [Purchase — Cash In],
+                      description AS Description
+               FROM ledger WHERE party_type='Vendor' ORDER BY id DESC LIMIT 10""", conn)
+    finally:
+        conn.close()
+
     if not recent.empty:
         recent["Date"] = recent["Date"].apply(fmt_ddmmyyyy)
-        recent["Entry Type"] = recent.apply(
-            lambda r: "🚛 Purchase" if (r["Purchase — Cash In"] or 0) > 0 and (r["Paid — Cash Out"] or 0) == 0
-            else ("💵 Payment" if (r["Paid — Cash Out"] or 0) > 0 and (r["Purchase — Cash In"] or 0) == 0
-                  else "🔄 Combined"), axis=1)
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
@@ -1160,8 +1149,10 @@ elif module == "✏️ Edit / Manage Entries":
     q += " ORDER BY txn_date DESC, id DESC"
 
     conn = get_db_connection()
-    rows = pd.read_sql_query(q, conn, params=params)
-    conn.close()
+    try:
+        rows = pd.read_sql_query(q, conn, params=params)
+    finally:
+        conn.close()
 
     if rows.empty:
         st.info("No entries found for this selection.")
@@ -1170,7 +1161,7 @@ elif module == "✏️ Edit / Manage Entries":
             "id": "Entry ID", "voucher_no": "Voucher No", "txn_date": "Date", "party_name": "Party Name",
             "party_type": "Type", "item_type": "Fuel", "qty_ltrs": "Ltrs",
             "rate": "Rate", "debit": "Debit", "credit": "Credit", "description": "Description",
-        }).drop(columns=[])
+        })
         st.dataframe(sr_index(view), use_container_width=True)
 
         labels = {
@@ -1178,7 +1169,7 @@ elif module == "✏️ Edit / Manage Entries":
             f"Dr {r.debit:,.0f} / Cr {r.credit:,.0f}": int(r.id)
             for r in rows.itertuples()
         }
-        picked_label = st.selectbox("Select the entry to edit or delete", list(labels.keys()))
+        picked_label = st.selectbox("Select entry to edit/delete", list(labels.keys()))
         entry_id = labels[picked_label]
         rec = rows[rows["id"] == entry_id].iloc[0]
 
@@ -1205,7 +1196,7 @@ elif module == "✏️ Edit / Manage Entries":
                     n_credit = st.number_input("Credit (Rs.)", min_value=0.0, value=float(rec["credit"]), step=100.0)
                     n_desc = st.text_input("Description", value=rec["description"] or "")
                 auto = st.checkbox("Auto-calculate amount from Ltrs × Rate", value=False)
-                do_update = st.form_submit_button("💾 Update This Entry")
+                do_update = st.form_submit_button("💾 Update Entry")
 
             if do_update:
                 d_val, c_val = n_debit, n_credit
@@ -1215,25 +1206,33 @@ elif module == "✏️ Edit / Manage Entries":
                     else:
                         c_val = n_qty * n_rate
                 conn = get_db_connection()
-                conn.execute(
-                    """UPDATE ledger SET txn_date=?, party_name=?, item_type=?, qty_ltrs=?, rate=?,
-                              debit=?, credit=?, description=?, voucher_no=? WHERE id=?""",
-                    (str(n_date), n_party,
-                     None if n_fuel == "None (Payment Only)" else n_fuel,
-                     n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute(
+                        """UPDATE ledger SET txn_date=?, party_name=?, item_type=?, qty_ltrs=?, rate=?,
+                                  debit=?, credit=?, description=?, voucher_no=? WHERE id=?""",
+                        (str(n_date), n_party,
+                         None if n_fuel == "None (Payment Only)" else n_fuel,
+                         n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 st.success(f"✅ Entry ID {entry_id} updated.")
                 st.rerun()
 
-        else:  # 🗑️ Delete Entry
+        else:
             st.warning(f"You are about to delete: {picked_label}")
             sure = st.checkbox("Yes, I am sure", key=f"sure_{entry_id}")
             if st.button("🗑️ Delete Entry", disabled=not sure):
                 conn = get_db_connection()
-                conn.execute("DELETE FROM ledger WHERE id = ?", (entry_id,))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute("DELETE FROM ledger WHERE id = ?", (entry_id,))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 resequence_ids("ledger")
                 st.success("✅ Entry deleted and IDs re-sequenced.")
                 st.rerun()
@@ -1252,14 +1251,16 @@ elif module == "⚖️ Stock vs Sale Month-End Match":
     title("Stock vs Sales Reconciliation")
 
     conn = get_db_connection()
-    stock_summary = pd.read_sql_query(
-        """SELECT item_type AS [Fuel Item], SUM(purchase_qty) AS [Total Purchased],
-                  SUM(sales_qty) AS [Total Stock Sales], SUM(dip_diff) AS [Total Dip Variance]
-           FROM stock_register GROUP BY item_type""", conn)
-    ledger_summary = pd.read_sql_query(
-        """SELECT item_type AS [Fuel Item], SUM(qty_ltrs) AS [Total Ledger Sales]
-           FROM ledger WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type""", conn)
-    conn.close()
+    try:
+        stock_summary = pd.read_sql_query(
+            """SELECT item_type AS [Fuel Item], SUM(purchase_qty) AS [Total Purchased],
+                      SUM(sales_qty) AS [Total Stock Sales], SUM(dip_diff) AS [Total Dip Variance]
+               FROM stock_register GROUP BY item_type""", conn)
+        ledger_summary = pd.read_sql_query(
+            """SELECT item_type AS [Fuel Item], SUM(qty_ltrs) AS [Total Ledger Sales]
+               FROM ledger WHERE party_type='Customer' AND item_type IS NOT NULL GROUP BY item_type""", conn)
+    finally:
+        conn.close()
 
     rec = pd.merge(stock_summary, ledger_summary, on="Fuel Item", how="outer").fillna(0)
     if not rec.empty:
@@ -1301,10 +1302,14 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                 else:
                     try:
                         conn = get_db_connection()
-                        conn.execute("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
-                                     (name.strip(), p_type, op_bal, phone))
-                        conn.commit()
-                        conn.close()
+                        try:
+                            conn.execute("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
+                                         (name.strip(), p_type, op_bal, phone))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        finally:
+                            conn.close()
                         st.success(f"✅ Party '{name}' added.")
                         st.rerun()
                     except sqlite3.IntegrityError:
@@ -1332,36 +1337,44 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                 else:
                     try:
                         conn = get_db_connection()
-                        conn.execute("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
-                                     (new_name.strip(), new_type, sel))
-                        conn.execute("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
-                                     (new_name.strip(), new_type, new_bal, new_phone, sel))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"✅ Party '{sel}' updated" +
-                                  (f" → renamed to '{new_name.strip()}'." if new_name.strip() != sel else "."))
+                        try:
+                            conn.execute("UPDATE ledger SET party_name=?, party_type=? WHERE party_name=?",
+                                         (new_name.strip(), new_type, sel))
+                            conn.execute("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
+                                         (new_name.strip(), new_type, new_bal, new_phone, sel))
+                            conn.commit()
+                            if hasattr(conn, "sync"):
+                                conn.sync()
+                        finally:
+                            conn.close()
+                        st.success(f"✅ Party '{sel}' updated.")
                         st.rerun()
                     except sqlite3.IntegrityError:
                         st.error(f"⚠️ Another party is already named '{new_name.strip()}'.")
 
-    else:  # ❌ Remove Party
+    else:
         allp = fetch_parties()
         if allp.empty:
             st.info("No parties yet.")
         else:
             to_del = st.selectbox("Select Party to Remove", allp["Party Name"].tolist(), key="del_party_sel")
             conn = get_db_connection()
-            cnt = conn.execute("SELECT COUNT(*) c FROM ledger WHERE party_name=?", (to_del,)).fetchone()["c"]
-            conn.close()
+            try:
+                cnt = conn.execute("SELECT COUNT(*) c FROM ledger WHERE party_name=?", (to_del,)).fetchone()["c"]
+            finally:
+                conn.close()
             if cnt:
-                st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries "
-                          "(they will just show under a party that's no longer in Master Setup).")
+                st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries.")
             sure = st.checkbox(f"Yes, remove '{to_del}'", key=f"sure_party_{to_del}")
             if st.button("❌ Confirm Delete Party", disabled=not sure):
                 conn = get_db_connection()
-                conn.execute("DELETE FROM parties WHERE name = ?", (to_del,))
-                conn.commit()
-                conn.close()
+                try:
+                    conn.execute("DELETE FROM parties WHERE name = ?", (to_del,))
+                    conn.commit()
+                    if hasattr(conn, "sync"):
+                        conn.sync()
+                finally:
+                    conn.close()
                 st.success(f"✅ Party '{to_del}' removed.")
                 st.rerun()
 
@@ -1375,12 +1388,14 @@ elif module == "💾 Backup & System Recovery":
     title("Database Backup & System Recovery")
 
     conn = get_db_connection()
-    backup = {
-        "parties": pd.read_sql_query("SELECT * FROM parties", conn).to_dict(orient="records"),
-        "stock_register": pd.read_sql_query("SELECT * FROM stock_register", conn).to_dict(orient="records"),
-        "ledger": pd.read_sql_query("SELECT * FROM ledger", conn).to_dict(orient="records"),
-    }
-    conn.close()
+    try:
+        backup = {
+            "parties": pd.read_sql_query("SELECT * FROM parties", conn).to_dict(orient="records"),
+            "stock_register": pd.read_sql_query("SELECT * FROM stock_register", conn).to_dict(orient="records"),
+            "ledger": pd.read_sql_query("SELECT * FROM ledger", conn).to_dict(orient="records"),
+        }
+    finally:
+        conn.close()
 
     st.download_button("💾 Download JSON Backup", json.dumps(backup, indent=2),
                        file_name=f"FD_CNG_Backup_{date.today()}.json", mime="application/json")
@@ -1394,36 +1409,40 @@ elif module == "💾 Backup & System Recovery":
         if st.button("⚠️ Confirm System Restore", disabled=not sure):
             data = json.load(up)
             conn = get_db_connection()
-            cur = conn.cursor()
-            cur.execute("DELETE FROM parties")
-            cur.execute("DELETE FROM stock_register")
-            cur.execute("DELETE FROM ledger")
+            try:
+                cur = conn.cursor()
+                cur.execute("DELETE FROM parties")
+                cur.execute("DELETE FROM stock_register")
+                cur.execute("DELETE FROM ledger")
 
-            for p in data.get("parties", []):
-                cur.execute("INSERT INTO parties (id,name,type,opening_balance,phone) VALUES (?,?,?,?,?)",
-                            (p.get("id"), p.get("name"), p.get("type"),
-                             p.get("opening_balance") or 0.0, p.get("phone") or ""))
+                for p in data.get("parties", []):
+                    cur.execute("INSERT INTO parties (id,name,type,opening_balance,phone) VALUES (?,?,?,?,?)",
+                                (p.get("id"), p.get("name"), p.get("type"),
+                                 p.get("opening_balance") or 0.0, p.get("phone") or ""))
 
-            stock_cols = ["id", "entry_date", "item_type", "opening_stock", "rate", "opening_amount",
-                          "purchase_qty", "purchase_rate", "purchase_amount", "total_purchase_amount",
-                          "avg_rate", "available_stock", "sales_qty", "sales_rate", "sales_amount",
-                          "total_sales_amount", "closing_amount", "closing_stock", "dip_diff",
-                          "actual_stock", "actual_amount"]
-            for s in data.get("stock_register", []):
-                cur.execute(
-                    f"INSERT INTO stock_register ({','.join(stock_cols)}) VALUES ({','.join('?' * len(stock_cols))})",
-                    tuple(s.get(c) for c in stock_cols))
+                stock_cols = ["id", "entry_date", "item_type", "opening_stock", "rate", "opening_amount",
+                              "purchase_qty", "purchase_rate", "purchase_amount", "total_purchase_amount",
+                              "avg_rate", "available_stock", "sales_qty", "sales_rate", "sales_amount",
+                              "total_sales_amount", "closing_amount", "closing_stock", "dip_diff",
+                              "actual_stock", "actual_amount"]
+                for s in data.get("stock_register", []):
+                    cur.execute(
+                        f"INSERT INTO stock_register ({','.join(stock_cols)}) VALUES ({','.join('?' * len(stock_cols))})",
+                        tuple(s.get(c) for c in stock_cols))
 
-            for l in data.get("ledger", []):
-                cur.execute(
-                    """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (l.get("id"), l.get("txn_date"), l.get("party_name"), l.get("party_type"),
-                     l.get("item_type"), l.get("qty_ltrs", 0.0), l.get("rate", 0.0),
-                     l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
-                     l.get("voucher_no")))
+                for l in data.get("ledger", []):
+                    cur.execute(
+                        """INSERT INTO ledger (id,txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (l.get("id"), l.get("txn_date"), l.get("party_name"), l.get("party_type"),
+                         l.get("item_type"), l.get("qty_ltrs", 0.0), l.get("rate", 0.0),
+                         l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
+                         l.get("voucher_no")))
 
-            conn.commit()
-            conn.close()
+                conn.commit()
+                if hasattr(conn, "sync"):
+                    conn.sync()
+            finally:
+                conn.close()
             st.success("✅ System restored successfully.")
             st.rerun()
