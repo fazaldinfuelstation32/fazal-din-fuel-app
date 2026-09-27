@@ -33,6 +33,52 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# 🔥 GLOBAL ENTER-KEY BLOCKER
+# Streamlit ke text inputs pe Enter dabane se form submit ho jata hai.
+# Yeh JS har input pe Enter key ko rok deta hai (sirf Tab jaisa behave karta hai).
+# Save button pe click karne se hi submit hoga.
+components.html(
+    """
+    <script>
+    (function() {
+        function blockEnterOnInputs() {
+            try {
+                const doc = window.parent.document;
+                // Saare text/password/number inputs pe Enter block karo
+                const inputs = doc.querySelectorAll(
+                    'input[type="text"], input[type="password"], input[type="number"], ' +
+                    'input[type="search"], textarea'
+                );
+                inputs.forEach(function(el) {
+                    if (el.dataset.enterBlocked === "1") return;
+                    el.dataset.enterBlocked = "1";
+                    el.addEventListener('keydown', function(e) {
+                        if (e.key === 'Enter' || e.keyCode === 13) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            // Focus move to next input (Tab jaisa behaviour)
+                            const all = Array.from(doc.querySelectorAll(
+                                'input[type="text"], input[type="password"], input[type="number"], ' +
+                                'input[type="search"], textarea'
+                            )).filter(x => !x.disabled && !x.readOnly);
+                            const idx = all.indexOf(el);
+                            if (idx >= 0 && idx < all.length - 1) {
+                                all[idx + 1].focus();
+                            }
+                            return false;
+                        }
+                    }, true);
+                });
+            } catch (err) {}
+        }
+        blockEnterOnInputs();
+        setInterval(blockEnterOnInputs, 700);
+    })();
+    </script>
+    """,
+    height=0, width=0,
+)
+
 components.html(
     """
     <script>
@@ -1008,7 +1054,7 @@ elif module == "🛢️ Daily Stock Register":
     st.caption(f"Auto-filled Opening Stock for {item_type} = {suggested_opening:,.2f} Ltrs  |  "
                f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
 
-    # Form with submit button only — Enter key will NOT submit
+    # Form with submit button only — global JS blocks Enter submit
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1377,7 +1423,6 @@ elif module == "✏️ Edit / Manage Entries":
         if search.strip():
             q += " AND (IFNULL(description,'') LIKE ? OR txn_date LIKE ?)"
             params += [f"%{search}%", f"%{search}%"]
-        # ✅ ASC order: oldest first, newest at bottom
         q += " ORDER BY txn_date ASC, id ASC"
 
         rows = read_df(q, params=params)
@@ -1468,7 +1513,6 @@ elif module == "✏️ Edit / Manage Entries":
         item_filter = s1.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="edit_stock_filter")
         s2.markdown("")
 
-        # ✅ ASC order: oldest first, newest at bottom
         if item_filter == "All":
             rows = read_df("SELECT * FROM stock_register ORDER BY entry_date ASC, id ASC")
         else:
