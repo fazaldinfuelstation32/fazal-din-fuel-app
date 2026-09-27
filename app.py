@@ -33,18 +33,35 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Session persistence: browser tab reload pe session rahe, close pe logout
+# Using sessionStorage: survives refresh, cleared on tab/browser close.
 components.html(
-    """<script>
+    """
+    <script>
     (function () {
+        const KEY = "fd_cng_auth_flag";
+        try {
+            const params = new URLSearchParams(window.parent.location.search);
+            // If streamlit set authed=1, mark sessionStorage
+            if (params.get("authed") === "1") {
+                sessionStorage.setItem(KEY, "1");
+                // Clean the URL to hide the flag
+                const url = new URL(window.parent.location.href);
+                url.searchParams.delete("authed");
+                window.parent.history.replaceState({}, "", url.toString());
+            }
+        } catch (e) {}
+        // Keep title fixed
         function fixTitle() {
             try { if (window.parent && window.parent.document) {
                 window.parent.document.title = "FD CNG Fuel Station";
             } } catch (e) {}
         }
         fixTitle();
-        setInterval(fixTitle, 800);
+        setInterval(fixTitle, 1500);
     })();
-    </script>""",
+    </script>
+    """,
     height=0, width=0,
 )
 
@@ -52,6 +69,7 @@ st.markdown(
     """
     <style>
         .main { background-color: #f4f7f5; }
+        .block-container { padding-top: 1.2rem; padding-bottom: 1.5rem; }
         .app-title {
             font-size: 26px; font-weight: 800; color: #ffffff;
             padding: 16px 22px; margin-bottom: 20px;
@@ -110,6 +128,8 @@ st.markdown(
         }
         button[data-baseweb="tab"] { font-weight: 700; }
         [data-testid="stDataFrame"] { border: 1px solid #e3e8ef; border-radius: 8px; overflow: hidden; }
+        /* Speed: reduce animation jank */
+        * { animation-duration: 0s !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -121,7 +141,7 @@ def title(text: str):
 
 
 # ==========================================
-# 2. LOGIN
+# 2. LOGIN (with session persistence)
 # ==========================================
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
@@ -140,9 +160,43 @@ def login_screen():
             if st.form_submit_button("🔑 Login", use_container_width=True):
                 if username == USERNAME and password == PASSWORD:
                     st.session_state["authenticated"] = True
+                    # Mark sessionStorage so a browser reload does not log out.
+                    st.markdown(
+                        """<script>
+                        try { sessionStorage.setItem("fd_cng_auth_flag", "1"); } catch(e) {}
+                        </script>""",
+                        unsafe_allow_html=True,
+                    )
                     st.rerun()
                 else:
                     st.error("Invalid Username or Password!")
+
+
+# Read sessionStorage flag once per browser session via query param trick.
+# If sessionStorage flag set but session_state cleared (page refresh), restore.
+_read_flag = components.html(
+    """
+    <script>
+    (function(){
+        try {
+            const flag = sessionStorage.getItem("fd_cng_auth_flag");
+            if (flag === "1") {
+                const url = new URL(window.parent.location.href);
+                if (!url.searchParams.get("authed")) {
+                    url.searchParams.set("authed", "1");
+                    window.parent.location.replace(url.toString());
+                }
+            }
+        } catch (e) {}
+    })();
+    </script>
+    """,
+    height=0, width=0,
+)
+
+_qp = st.query_params if hasattr(st, "query_params") else {}
+if not st.session_state["authenticated"] and _qp.get("authed") == "1":
+    st.session_state["authenticated"] = True
 
 
 if not st.session_state["authenticated"]:
@@ -173,8 +227,6 @@ def get_db_connection():
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -262,14 +314,6 @@ def init_db():
         )"""
     )
 
-    # Index for fast lookups
-    try:
-        execute_query("CREATE INDEX IF NOT EXISTS idx_ledger_party ON ledger(party_name, party_type)")
-        execute_query("CREATE INDEX IF NOT EXISTS idx_ledger_date ON ledger(txn_date)")
-        execute_query("CREATE INDEX IF NOT EXISTS idx_stock_date ON stock_register(entry_date, item_type)")
-    except Exception:
-        pass
-
     df_p = read_df("SELECT COUNT(*) c FROM parties")
     total_parties = df_p.iloc[0]["c"] if not df_p.empty else 0
 
@@ -318,7 +362,18 @@ def payload_token(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
 
-def fetch_parties(p_type=None) -> pd.DataFrame:
+def already_saved(token: str) -> bool:
+    """Guard against accidental double-click duplicates, but auto-clears per session
+    so that genuine repeat entries (same values on different days) still work."""
+    saved = st.session_state.setdefault("saved_tokens", set())
+    if token in saved:
+        return True
+    saved.add(token)
+    return False
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_fetch_parties(p_type=None):
     base = ("SELECT id, name AS [Party Name], type AS [Type], "
             "opening_balance AS [Opening Balance], phone AS [Phone] FROM parties ")
     if p_type:
@@ -328,14 +383,8 @@ def fetch_parties(p_type=None) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def _cached_party_names(p_type: str):
-    df = read_df("SELECT name FROM parties WHERE type = ? ORDER BY name ASC", params=(p_type,))
-    return df["name"].tolist() if not df.empty else []
-
-
-def fetch_party_names(p_type: str):
-    return _cached_party_names(p_type)
+def fetch_parties(p_type=None) -> pd.DataFrame:
+    return cached_fetch_parties(p_type)
 
 
 def calculate_party_balances(party_type: str) -> pd.DataFrame:
@@ -366,7 +415,6 @@ def calculate_party_balances(party_type: str) -> pd.DataFrame:
 
 
 def resequence_ids(table: str):
-    """Re-sequence IDs. Fast version with a single CASE-based UPDATE for SQLite."""
     date_col = "txn_date" if table == "ledger" else "entry_date"
     df = read_df(f"SELECT id FROM {table} ORDER BY {date_col} ASC, id ASC")
     if df.empty:
@@ -383,9 +431,14 @@ def resequence_ids(table: str):
     else:
         with _db_lock:
             cur = conn.cursor()
-            # Build single CASE statement to update all IDs at once
-            case_sql = "CASE id " + " ".join(f"WHEN {old} THEN {new}" for new, old in enumerate(ids, start=1)) + " END"
-            cur.execute(f"UPDATE {table} SET id = {case_sql} WHERE id IN ({','.join(map(str, ids))})")
+            cur.executemany(
+                f"UPDATE {table} SET id = ? WHERE id = ?",
+                [(old + 1_000_000, old) for old in ids],
+            )
+            cur.executemany(
+                f"UPDATE {table} SET id = ? WHERE id = ?",
+                [(new, old + 1_000_000) for new, old in enumerate(ids, start=1)],
+            )
             conn.commit()
 
 
@@ -453,25 +506,21 @@ def last_avg_rate(item_type: str) -> float:
     if df.empty:
         return 0.0
     row = df.iloc[0]
-
     avg_r = float(row["avg_rate"] or 0.0)
     if avg_r > 0:
         return avg_r
-
     op_r = float(row["rate"] or 0.0)
     if op_r > 0:
         return op_r
-
     cs = float(row["closing_stock"] or 0.0)
     ca = float(row["closing_amount"] or 0.0)
     if cs > 0 and ca > 0:
         return ca / cs
-
     return 0.0
 
 
 def next_voucher_no() -> str:
-    df = read_df("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL ORDER BY id DESC LIMIT 50")
+    df = read_df("SELECT voucher_no FROM ledger WHERE voucher_no IS NOT NULL ORDER BY id DESC LIMIT 500")
     max_n = 0
     if not df.empty:
         for r in df["voucher_no"]:
@@ -486,6 +535,18 @@ def fmt_ddmmyyyy(d) -> str:
         return pd.to_datetime(d).strftime("%d-%m-%Y")
     except Exception:
         return str(d)
+
+
+def clear_data_caches():
+    """Clear cached data so table views reflect latest writes instantly."""
+    try:
+        cached_fetch_parties.clear()
+    except Exception:
+        pass
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
 
 
 def live_preview(rows):
@@ -576,8 +637,13 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
             <div class="totals">Closing Balance: Rs. {closing_bal:,.2f}</div>
         </div>
         <script>
-            window.onload = function () {{ window.focus(); window.print(); }};
-            window.onafterprint = function () {{ window.close(); }};
+            window.onload = function () {{
+                window.focus();
+                window.print();
+            }};
+            window.onafterprint = function () {{
+                window.close();
+            }};
         </script>
     </body>
     </html>
@@ -594,7 +660,11 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
         document.getElementById('printBtn').onclick = function () {{
             var doc = {safe_doc};
             var w = window.open('', '_blank');
-            if (w) {{ w.document.open(); w.document.write(doc); w.document.close(); }}
+            if (w) {{
+                w.document.open();
+                w.document.write(doc);
+                w.document.close();
+            }}
         }};
     </script>
     """
@@ -689,7 +759,10 @@ def render_print_stock(from_date, to_date, item_filter="All"):
             </table>
         </div>
         <script>
-            window.onload = function () {{ window.focus(); window.print(); }};
+            window.onload = function () {{
+                window.focus();
+                window.print();
+            }};
             window.onafterprint = function () {{ window.close(); }};
         </script>
     </body>
@@ -707,7 +780,11 @@ def render_print_stock(from_date, to_date, item_filter="All"):
         document.getElementById('printStockBtn').onclick = function () {{
             var doc = {safe_doc};
             var w = window.open('', '_blank');
-            if (w) {{ w.document.open(); w.document.write(doc); w.document.close(); }}
+            if (w) {{
+                w.document.open();
+                w.document.write(doc);
+                w.document.close();
+            }}
         }};
     </script>
     """
@@ -744,7 +821,19 @@ module = st.sidebar.radio(
 )
 
 if st.sidebar.button("🚪 Logout"):
+    # Clear the sessionStorage flag so browser reload does not auto re-login.
+    st.markdown(
+        """<script>
+        try { sessionStorage.removeItem("fd_cng_auth_flag"); } catch(e) {}
+        </script>""",
+        unsafe_allow_html=True,
+    )
     st.session_state.clear()
+    st.cache_data.clear()
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
     st.rerun()
 
 # ==========================================
@@ -864,7 +953,7 @@ elif module == "📄 Customer/Vendor Statements & Print":
 
     c1, c2 = st.columns(2)
     p_type = c1.selectbox("Party Type", ["Customer", "Vendor"])
-    plist = fetch_party_names(p_type)
+    plist = fetch_parties(p_type)["Party Name"].tolist()
     party = c2.selectbox("Party Name", plist if plist else ["None"])
 
     d1, d2 = st.columns(2)
@@ -905,13 +994,14 @@ elif module == "📄 Customer/Vendor Statements & Print":
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER (Direct Save, No Review)
+# MODULE 4: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
 
-    st.caption("Dip Difference = Shortage/Excess during physical dip check. "
-               "Opening Stock and Opening Rate are auto-filled from the last saved entry.")
+    st.caption("Dip Difference = Shortage/Excess entered during physical dip check. "
+               "Negative means shortage, positive means excess. Opening Stock and Opening Rate "
+               "are auto-filled from the last saved entry.")
 
     item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
 
@@ -929,7 +1019,7 @@ elif module == "🛢️ Daily Stock Register":
     suggested_opening = st.session_state["stk_suggested_opening"]
     suggested_rate = st.session_state["stk_suggested_rate"]
 
-    st.caption(f"Auto-filled Opening Stock = {suggested_opening:,.2f} Ltrs  |  "
+    st.caption(f"Auto-filled Opening Stock for {item_type} = {suggested_opening:,.2f} Ltrs  |  "
                f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
 
     with st.form("stock_form", clear_on_submit=False):
@@ -951,9 +1041,8 @@ elif module == "🛢️ Daily Stock Register":
             dip_checked = st.checkbox("Physical Dip Check done today?", value=True, key=f"stk_dipchk_{fver}")
             dip_str = st.text_input("Dip Shortage / Excess (+/- Ltrs)", value="", placeholder="0", key=f"stk_dip_{fver}")
 
-        submitted = st.form_submit_button("💾 Save Stock Entry", use_container_width=True)
+        save_stock = st.form_submit_button("✅ Save Stock Entry", use_container_width=True)
 
-    # Live parse
     op_rate = safe_float(op_rate_str)
     p_qty = safe_float(p_qty_str)
     p_rate = safe_float(p_rate_str)
@@ -984,7 +1073,6 @@ elif module == "🛢️ Daily Stock Register":
 
     k = stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked)
 
-    # Live Preview
     if any([op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input]):
         sign = "SHORTAGE (-)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
         live_preview([
@@ -1005,33 +1093,26 @@ elif module == "🛢️ Daily Stock Register":
             ("★ Final Closing Stock (Next Opening)", f"{k['final_closing']:,.2f} Ltrs"),
         ])
 
-    if submitted:
-        if op_stock == 0 and p_qty == 0 and s_qty == 0:
-            st.warning("⚠️ Nothing to save — enter Opening Stock, Purchase Qty, or Sales Qty.")
+    # Direct save (no Review step)
+    if save_stock:
+        if not any([p_qty, s_qty, dip_input]) and op_stock == 0 and suggested_opening == 0:
+            st.warning("Nothing to save — enter at least Purchase / Sales / Dip.")
         else:
-            token = payload_token("stock", e_date, item_type, op_stock, op_rate, p_qty, p_rate,
-                                   s_qty, s_rate, dip_input, dip_checked)
-            dup_df = read_df("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
-                             params=(str(e_date), item_type))
-            dup = dup_df.iloc[0]["c"] if not dup_df.empty else 0
-
-            if dup:
-                st.warning(f"⚠️ {dup} entry already exists for {e_date} / {item_type}. Please delete the old entry first or change the date.")
-            else:
-                execute_query(
-                    """INSERT INTO stock_register (
-                        entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
-                        purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
-                        sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (str(e_date), item_type, op_stock, op_rate, k["op_amount"],
-                     p_qty, p_rate, k["p_amount"], k["tot_p_amount"], k["avg_rate"],
-                     k["avail"], s_qty, s_rate, k["s_amount"], k["tot_s_amount"],
-                     k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
-                )
-                st.session_state["stock_form_version"] += 1
-                st.success("✅ Daily stock entry saved. Form cleared.")
-                st.rerun()
+            execute_query(
+                """INSERT INTO stock_register (
+                    entry_date,item_type,opening_stock,rate,opening_amount,purchase_qty,purchase_rate,
+                    purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
+                    sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (str(e_date), item_type, op_stock, op_rate, k["op_amount"],
+                 p_qty, p_rate, k["p_amount"], k["tot_p_amount"], k["avg_rate"],
+                 k["avail"], s_qty, s_rate, k["s_amount"], k["tot_s_amount"],
+                 k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
+            )
+            st.session_state["stock_form_version"] += 1
+            clear_data_caches()
+            st.success("✅ Daily stock entry saved. Form cleared — ready for the next entry.")
+            st.rerun()
 
     st.markdown("### 📊 Existing Stock Records")
 
@@ -1059,16 +1140,18 @@ elif module == "🛢️ Daily Stock Register":
         pr_item = pp3.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="stk_pr_item")
         if st.button("🖨️ Generate Print Preview", key="stk_print_btn"):
             render_print_stock(pr_from, pr_to, pr_item)
+
+        st.info("ℹ️ To edit or delete a stock entry, use **✏️ Edit / Manage Entries** from the sidebar.")
     else:
         st.info("No stock records yet.")
 
 # ==========================================
-# MODULE 5: CUSTOMER ENTRY (Direct Save, No Review)
+# MODULE 5: CUSTOMER ENTRY
 # ==========================================
 elif module == "💳 Party Daily Sale & Credit Entry":
     title("Customer Credit Sale & Voucher Entry")
 
-    customers = fetch_party_names("Customer")
+    customers = fetch_parties("Customer")["Party Name"].tolist()
 
     st.markdown("#### 1️⃣ Choose Entry Type")
     entry_kind = st.radio(
@@ -1121,7 +1204,8 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                 pay_str = st.text_input("Amount Received (Rs.)", value="", placeholder="0", key=f"c_pay_{cver}")
                 desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
             payment = safe_float(pay_str)
-        submitted = st.form_submit_button("💾 Save Customer Entry", use_container_width=True)
+
+        save_cust = st.form_submit_button("✅ Save Customer Transaction", use_container_width=True)
 
     qty = safe_float(qty_str)
     rate = safe_float(rate_str)
@@ -1140,11 +1224,12 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             ("★ Received — Cash Out (Credit)", f"Rs. {credit:,.2f}"),
         ])
 
-    if submitted:
+    # Direct save
+    if save_cust:
         if party_name == "None":
-            st.error("⚠️ Please select a customer.")
+            st.error("Please select a customer.")
         elif debit == 0 and credit == 0:
-            st.warning("⚠️ Nothing to save — enter Qty/Rate for a sale or a payment amount.")
+            st.warning("Nothing to save — enter either Qty/Rate for a sale or a payment amount.")
         else:
             execute_query(
                 """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
@@ -1153,6 +1238,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                  None if fuel == "Cash Payment/Voucher" else fuel,
                  qty, rate, debit, credit, desc, voucher_no.strip() or None))
             st.session_state["cust_form_ver"] += 1
+            clear_data_caches()
             st.success("✅ Customer transaction saved.")
             st.rerun()
 
@@ -1169,12 +1255,12 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
-# MODULE 6: VENDOR ENTRY (Direct Save, No Review)
+# MODULE 6: VENDOR ENTRY
 # ==========================================
 elif module == "🚛 Vendor Purchasing & Dip Stock":
     title("Vendor Purchasing & Payments")
 
-    vendors = fetch_party_names("Vendor")
+    vendors = fetch_parties("Vendor")["Party Name"].tolist()
 
     vendor_name = st.selectbox("Vendor Name", vendors if vendors else ["None"], key="vend_pick")
     if vendor_name != "None":
@@ -1229,7 +1315,8 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                 paid_str = st.text_input("Payment Paid (Rs.)", value="", placeholder="0", key=f"v_paid_{vver}")
                 desc = st.text_input("Invoice / Tanker No.", key=f"v_desc_{vver}")
             paid = safe_float(paid_str)
-        submitted = st.form_submit_button("💾 Save Vendor Entry", use_container_width=True)
+
+        save_vend = st.form_submit_button("✅ Save Vendor Transaction", use_container_width=True)
 
     qty = safe_float(qty_str)
     rate = safe_float(rate_str)
@@ -1248,11 +1335,11 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
             ("★ Paid — Cash Out (Debit)", f"Rs. {debit:,.2f}"),
         ])
 
-    if submitted:
+    if save_vend:
         if vendor_name == "None":
-            st.error("⚠️ Please select a vendor.")
+            st.error("Please select a vendor.")
         elif credit == 0 and debit == 0:
-            st.warning("⚠️ Nothing to save — enter purchase Qty/Rate or a payment amount.")
+            st.warning("Nothing to save — enter either purchase Qty/Rate or a payment amount.")
         else:
             execute_query(
                 """INSERT INTO ledger (txn_date,party_name,party_type,item_type,qty_ltrs,rate,debit,credit,description,voucher_no)
@@ -1261,6 +1348,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                  None if fuel == "Direct Payment" else fuel,
                  qty, rate, debit, credit, desc, voucher_no.strip() or None))
             st.session_state["vend_form_ver"] += 1
+            clear_data_caches()
             st.success("✅ Vendor transaction saved.")
             st.rerun()
 
@@ -1277,20 +1365,24 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         st.dataframe(sr_index(recent), use_container_width=True)
 
 # ==========================================
-# MODULE 7: EDIT / DELETE ENTRIES (With Stock Register)
+# MODULE 7: EDIT / DELETE (Ledger + Stock)
 # ==========================================
 elif module == "✏️ Edit / Manage Entries":
     title("Edit / Delete Entries")
 
-    tab_ledger, tab_stock = st.tabs(["📒 Ledger Entries", "🛢️ Stock Register Entries"])
+    entry_source = st.radio(
+        "Choose Data Source",
+        ["📒 Ledger Entries (Customer / Vendor)", "🛢️ Stock Register Entries"],
+        horizontal=True, key="edit_source_kind"
+    )
 
-    # ========== LEDGER TAB ==========
-    with tab_ledger:
+    # ---------------- LEDGER EDIT ----------------
+    if entry_source.startswith("📒"):
         f1, f2, f3 = st.columns(3)
-        p_type = f1.selectbox("Party Type", ["Customer", "Vendor"], key="edit_p_type")
-        names = ["— All —"] + fetch_party_names(p_type)
-        sel_party = f2.selectbox("Party Name", names, key="edit_party_sel2")
-        search = f3.text_input("Search in Description / Date", key="edit_search")
+        p_type = f1.selectbox("Party Type", ["Customer", "Vendor"])
+        names = ["— All —"] + fetch_parties(p_type)["Party Name"].tolist()
+        sel_party = f2.selectbox("Party Name", names)
+        search = f3.text_input("Search in Description / Date")
 
         q = "SELECT * FROM ledger WHERE party_type = ?"
         params = [p_type]
@@ -1300,7 +1392,7 @@ elif module == "✏️ Edit / Manage Entries":
         if search.strip():
             q += " AND (IFNULL(description,'') LIKE ? OR txn_date LIKE ?)"
             params += [f"%{search}%", f"%{search}%"]
-        q += " ORDER BY txn_date DESC, id DESC LIMIT 500"
+        q += " ORDER BY txn_date DESC, id DESC"
 
         rows = read_df(q, params=params)
 
@@ -1319,7 +1411,7 @@ elif module == "✏️ Edit / Manage Entries":
                 f"Dr {r.debit:,.0f} / Cr {r.credit:,.0f}": int(r.id)
                 for r in rows.itertuples()
             }
-            picked_label = st.selectbox("Select ledger entry to edit/delete", list(labels.keys()), key="pick_ledger")
+            picked_label = st.selectbox("Select entry to edit/delete", list(labels.keys()), key="ledger_pick")
             entry_id = labels[picked_label]
             rec = rows[rows["id"] == entry_id].iloc[0]
 
@@ -1330,26 +1422,23 @@ elif module == "✏️ Edit / Manage Entries":
                 with st.form(f"edit_form_{entry_id}"):
                     e1, e2 = st.columns(2)
                     with e1:
-                        n_date = st.date_input("Date", datetime.strptime(rec["txn_date"], "%Y-%m-%d").date(),
-                                                format="DD-MM-YYYY", key=f"ed_date_{entry_id}")
-                        party_options = fetch_party_names(p_type)
+                        n_date = st.date_input("Date", datetime.strptime(rec["txn_date"], "%Y-%m-%d").date(), format="DD-MM-YYYY")
+                        party_options = fetch_parties(p_type)["Party Name"].tolist()
                         n_party = st.selectbox("Party Name", party_options,
                                                index=party_options.index(rec["party_name"])
-                                               if rec["party_name"] in party_options else 0,
-                                               key=f"ed_party_{entry_id}")
+                                               if rec["party_name"] in party_options else 0)
                         fuel_options = ["Petrol", "Diesel", "None (Payment Only)"]
                         cur_fuel = rec["item_type"] if rec["item_type"] in ("Petrol", "Diesel") else "None (Payment Only)"
-                        n_fuel = st.selectbox("Fuel Item", fuel_options, index=fuel_options.index(cur_fuel),
-                                              key=f"ed_fuel_{entry_id}")
-                        n_voucher = st.text_input("Voucher No.", value=rec["voucher_no"] or "", key=f"ed_vno_{entry_id}")
+                        n_fuel = st.selectbox("Fuel Item", fuel_options, index=fuel_options.index(cur_fuel))
+                        n_voucher = st.text_input("Voucher No.", value=rec["voucher_no"] or "")
                     with e2:
-                        n_qty = st.number_input("Ltrs", min_value=0.0, value=float(rec["qty_ltrs"]), step=1.0, key=f"ed_qty_{entry_id}")
-                        n_rate = st.number_input("Rate", min_value=0.0, value=float(rec["rate"]), step=0.1, key=f"ed_rate_{entry_id}")
-                        n_debit = st.number_input("Debit (Rs.)", min_value=0.0, value=float(rec["debit"]), step=100.0, key=f"ed_deb_{entry_id}")
-                        n_credit = st.number_input("Credit (Rs.)", min_value=0.0, value=float(rec["credit"]), step=100.0, key=f"ed_cred_{entry_id}")
-                        n_desc = st.text_input("Description", value=rec["description"] or "", key=f"ed_desc_{entry_id}")
-                    auto = st.checkbox("Auto-calculate amount from Ltrs × Rate", value=False, key=f"ed_auto_{entry_id}")
-                    do_update = st.form_submit_button("💾 Update Ledger Entry")
+                        n_qty = st.number_input("Ltrs", min_value=0.0, value=float(rec["qty_ltrs"]), step=1.0)
+                        n_rate = st.number_input("Rate", min_value=0.0, value=float(rec["rate"]), step=0.1)
+                        n_debit = st.number_input("Debit (Rs.)", min_value=0.0, value=float(rec["debit"]), step=100.0)
+                        n_credit = st.number_input("Credit (Rs.)", min_value=0.0, value=float(rec["credit"]), step=100.0)
+                        n_desc = st.text_input("Description", value=rec["description"] or "")
+                    auto = st.checkbox("Auto-calculate amount from Ltrs × Rate", value=False)
+                    do_update = st.form_submit_button("💾 Update Entry", use_container_width=True)
 
                 if do_update:
                     d_val, c_val = n_debit, n_credit
@@ -1364,115 +1453,127 @@ elif module == "✏️ Edit / Manage Entries":
                         (str(n_date), n_party,
                          None if n_fuel == "None (Payment Only)" else n_fuel,
                          n_qty, n_rate, d_val, c_val, n_desc, n_voucher.strip() or None, entry_id))
-                    st.success(f"✅ Ledger Entry ID {entry_id} updated.")
+                    clear_data_caches()
+                    st.success(f"✅ Entry ID {entry_id} updated.")
                     st.rerun()
 
             else:
-                st.warning(f"You are about to permanently delete: {picked_label}")
-                sure = st.checkbox("Yes, I am sure — delete this entry permanently", key=f"sure_{entry_id}")
-                if st.button("🗑️ Delete Ledger Entry", disabled=not sure, key=f"del_btn_{entry_id}"):
-                    execute_query("DELETE FROM ledger WHERE id = ?", (entry_id,))
-                    st.success(f"✅ Ledger Entry ID {entry_id} permanently deleted.")
+                st.warning(f"You are about to delete: {picked_label}")
+                sure = st.checkbox("Yes, I am sure", key=f"sure_{entry_id}")
+                if st.button("🗑️ Delete Entry Permanently", disabled=not sure, use_container_width=True):
+                    execute_query("DELETE FROM ledger WHERE id = ?", (int(entry_id),))
+                    resequence_ids("ledger")
+                    # Clear duplicate-guard cache so a fresh entry with same values can be saved again.
+                    st.session_state.pop("saved_tokens", None)
+                    clear_data_caches()
+                    st.success(f"✅ Entry ID {entry_id} deleted and IDs re-sequenced.")
                     st.rerun()
 
         st.markdown("---")
-        if st.button("🔢 Re-sequence Ledger Entry IDs (1,2,3...)"):
+        if st.button("🔢 Re-sequence all Entry IDs (1,2,3...)"):
             resequence_ids("ledger")
-            st.success("Ledger IDs re-sequenced in date order.")
+            resequence_ids("stock_register")
+            clear_data_caches()
+            st.success("All IDs re-sequenced in date order.")
             st.rerun()
 
-    # ========== STOCK TAB ==========
-    with tab_stock:
-        st.markdown("#### 🛢️ Stock Register Entries")
+    # ---------------- STOCK EDIT ----------------
+    else:
+        s1, s2 = st.columns([1, 3])
+        item_filter = s1.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="edit_stock_filter")
+        s2.markdown("")  # spacing
 
-        sf1, sf2 = st.columns(2)
-        stock_item_filter = sf1.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="stock_edit_item")
-        stock_search = sf2.text_input("Search by Date (YYYY-MM-DD)", key="stock_edit_search")
-
-        sq = "SELECT * FROM stock_register WHERE 1=1"
-        sparams = []
-        if stock_item_filter != "All":
-            sq += " AND item_type = ?"
-            sparams.append(stock_item_filter)
-        if stock_search.strip():
-            sq += " AND entry_date LIKE ?"
-            sparams.append(f"%{stock_search}%")
-        sq += " ORDER BY entry_date DESC, id DESC LIMIT 500"
-
-        stock_rows = read_df(sq, params=sparams)
-
-        if stock_rows.empty:
-            st.info("No stock entries found for this selection.")
+        if item_filter == "All":
+            rows = read_df("SELECT * FROM stock_register ORDER BY entry_date DESC, id DESC")
         else:
-            sview = stock_rows.rename(columns={
-                "id": "Entry ID", "entry_date": "Date", "item_type": "Fuel",
+            rows = read_df("SELECT * FROM stock_register WHERE item_type=? ORDER BY entry_date DESC, id DESC",
+                           params=(item_filter,))
+
+        if rows.empty:
+            st.info("No stock register entries found.")
+        else:
+            view = rows.rename(columns={
+                "id": "Entry ID", "entry_date": "Entry Date", "item_type": "Fuel Item",
                 "opening_stock": "Opening Stock", "rate": "Rate",
-                "purchase_qty": "Purch Qty", "purchase_rate": "Purch Rate",
+                "purchase_qty": "Purchase Qty", "purchase_rate": "Purchase Rate",
                 "sales_qty": "Sales Qty", "sales_rate": "Sales Rate",
                 "avg_rate": "Avg Rate", "closing_stock": "Closing Stock",
-                "actual_stock": "Actual Stock", "dip_diff": "Dip Diff",
-            })[["Entry ID", "Date", "Fuel", "Opening Stock", "Rate", "Purch Qty", "Purch Rate",
-                "Sales Qty", "Sales Rate", "Avg Rate", "Closing Stock", "Actual Stock", "Dip Diff"]]
-            st.dataframe(sr_index(sview), use_container_width=True)
+                "actual_stock": "Actual Dip Stock", "dip_diff": "Dip Difference",
+            })
+            show_cols = ["Entry ID", "Entry Date", "Fuel Item", "Opening Stock", "Rate",
+                         "Purchase Qty", "Purchase Rate", "Sales Qty", "Sales Rate",
+                         "Avg Rate", "Closing Stock", "Actual Dip Stock", "Dip Difference"]
+            st.dataframe(sr_index(view[show_cols]), use_container_width=True)
 
-            slabels = {
-                f"ID {r.id} | {r.entry_date} | {r.item_type} | "
-                f"Open {r.opening_stock:,.0f} | Purch {r.purchase_qty:,.0f} | Sales {r.sales_qty:,.0f}": int(r.id)
-                for r in stock_rows.itertuples()
+            labels = {
+                f"ID {r.id} | {r.entry_date} | {r.item_type} | Open {r.opening_stock:,.0f} | "
+                f"Purch {r.purchase_qty:,.0f} | Sales {r.sales_qty:,.0f} | Close {r.closing_stock:,.0f}": int(r.id)
+                for r in rows.itertuples()
             }
-            spicked = st.selectbox("Select stock entry to edit/delete", list(slabels.keys()), key="pick_stock")
-            s_id = slabels[spicked]
-            s_rec = stock_rows[stock_rows["id"] == s_id].iloc[0]
+            picked_label = st.selectbox("Select stock entry to edit/delete", list(labels.keys()), key="stock_pick")
+            sid = labels[picked_label]
+            srec = rows[rows["id"] == sid].iloc[0]
 
-            s_action = st.radio("Choose Action", ["✏️ Edit Stock Entry", "🗑️ Delete Stock Entry"],
-                                horizontal=True, key=f"stock_action_{s_id}")
+            action = st.radio("Choose Action", ["✏️ Edit Entry", "🗑️ Delete Entry"],
+                              horizontal=True, key=f"stock_action_{sid}")
 
-            if s_action == "✏️ Edit Stock Entry":
-                with st.form(f"edit_stock_form_{s_id}"):
-                    sc1, sc2 = st.columns(2)
-                    with sc1:
-                        s_date = st.date_input("Date", datetime.strptime(s_rec["entry_date"], "%Y-%m-%d").date(),
-                                                format="DD-MM-YYYY", key=f"sd_date_{s_id}")
-                        s_item = st.selectbox("Fuel Item", ["Petrol", "Diesel"],
-                                               index=0 if s_rec["item_type"] == "Petrol" else 1,
-                                               key=f"sd_item_{s_id}")
-                        s_op_stock = st.number_input("Opening Stock (Ltrs)", min_value=0.0,
-                                                      value=float(s_rec["opening_stock"] or 0.0), step=1.0,
-                                                      key=f"sd_opstk_{s_id}")
-                        s_op_rate = st.number_input("Opening Rate", min_value=0.0,
-                                                     value=float(s_rec["rate"] or 0.0), step=0.1,
-                                                     key=f"sd_oprate_{s_id}")
-                    with sc2:
-                        s_p_qty = st.number_input("Purchase Qty (Ltrs)", min_value=0.0,
-                                                   value=float(s_rec["purchase_qty"] or 0.0), step=1.0,
-                                                   key=f"sd_pqty_{s_id}")
-                        s_p_rate = st.number_input("Purchase Rate", min_value=0.0,
-                                                    value=float(s_rec["purchase_rate"] or 0.0), step=0.1,
-                                                    key=f"sd_prate_{s_id}")
-                        s_s_qty = st.number_input("Sales Qty (Ltrs)", min_value=0.0,
-                                                   value=float(s_rec["sales_qty"] or 0.0), step=1.0,
-                                                   key=f"sd_sqty_{s_id}")
-                        s_s_rate = st.number_input("Sales Rate", min_value=0.0,
-                                                    value=float(s_rec["sales_rate"] or 0.0), step=0.1,
-                                                    key=f"sd_srate_{s_id}")
-                    s_dip = st.number_input("Dip Difference (+/- Ltrs)", value=float(s_rec["dip_diff"] or 0.0),
-                                             step=0.1, key=f"sd_dip_{s_id}")
-                    s_update = st.form_submit_button("💾 Update Stock Entry")
+            if action == "✏️ Edit Entry":
+                with st.form(f"edit_stock_form_{sid}"):
+                    e1, e2, e3 = st.columns(3)
+                    with e1:
+                        n_date = st.date_input("Entry Date",
+                                                datetime.strptime(srec["entry_date"], "%Y-%m-%d").date(),
+                                                format="DD-MM-YYYY")
+                        fuel_opts = ["Petrol", "Diesel"]
+                        n_fuel = st.selectbox("Fuel Item", fuel_opts,
+                                              index=fuel_opts.index(srec["item_type"]))
+                        n_op_stock = st.number_input("Opening Stock (Ltrs)", min_value=0.0,
+                                                     value=float(srec["opening_stock"]), step=1.0)
+                        n_rate = st.number_input("Opening Rate", min_value=0.0,
+                                                 value=float(srec["rate"]), step=0.1, format="%.4f")
+                    with e2:
+                        n_pq = st.number_input("Purchase Qty (Ltrs)", min_value=0.0,
+                                               value=float(srec["purchase_qty"]), step=1.0)
+                        n_pr = st.number_input("Purchase Rate", min_value=0.0,
+                                               value=float(srec["purchase_rate"]), step=0.1, format="%.4f")
+                        n_sq = st.number_input("Sales Qty (Ltrs)", min_value=0.0,
+                                               value=float(srec["sales_qty"]), step=1.0)
+                        n_sr = st.number_input("Sales Rate", min_value=0.0,
+                                               value=float(srec["sales_rate"]), step=0.1, format="%.4f")
+                    with e3:
+                        n_dip = st.number_input("Dip Shortage / Excess (+/- Ltrs)",
+                                                value=float(srec["dip_diff"]), step=1.0)
+                        st.markdown("**Auto-calculated (preview):**")
+                        _op_amount = n_op_stock * n_rate
+                        _p_amount = n_pq * n_pr
+                        _tot_p = _op_amount + _p_amount
+                        _avail = n_op_stock + n_pq
+                        _avg = (_tot_p / _avail) if _avail > 0 else 0.0
+                        _s_amt = n_sq * n_sr
+                        _ts_amt = n_sq * _avg
+                        _c_amt = _tot_p - _ts_amt
+                        _c_stock = _avail - n_sq
+                        _act_stock = _c_stock + n_dip
+                        _act_amt = _act_stock * _avg
+                        st.write(f"Avg Rate: Rs. {_avg:,.4f}")
+                        st.write(f"Closing Stock: {_c_stock:,.2f} Ltrs")
+                        st.write(f"Actual Stock: {_act_stock:,.2f} Ltrs")
+                        st.write(f"Closing Amount: Rs. {_c_amt:,.2f}")
 
-                if s_update:
-                    # Recalculate all derived values
-                    s_op_amt = s_op_stock * s_op_rate
-                    s_p_amt = s_p_qty * s_p_rate
-                    s_tot_p = s_op_amt + s_p_amt
-                    s_avail = s_op_stock + s_p_qty
-                    s_avg = (s_tot_p / s_avail) if s_avail > 0 else 0.0
-                    s_s_amt = s_s_qty * s_s_rate
-                    s_tot_s_amt = s_s_qty * s_avg
-                    s_close_amt = s_tot_p - s_tot_s_amt
-                    s_close_stock = s_avail - s_s_qty
-                    s_dip_amt = s_dip * s_avg
-                    s_actual = s_close_stock + s_dip
-                    s_act_amt = s_actual * s_avg
+                    do_update = st.form_submit_button("💾 Update Stock Entry", use_container_width=True)
+
+                if do_update:
+                    _op_amount = n_op_stock * n_rate
+                    _p_amount = n_pq * n_pr
+                    _tot_p = _op_amount + _p_amount
+                    _avail = n_op_stock + n_pq
+                    _avg = (_tot_p / _avail) if _avail > 0 else 0.0
+                    _s_amt = n_sq * n_sr
+                    _ts_amt = n_sq * _avg
+                    _c_amt = _tot_p - _ts_amt
+                    _c_stock = _avail - n_sq
+                    _act_stock = _c_stock + n_dip
+                    _act_amt = _act_stock * _avg
 
                     execute_query(
                         """UPDATE stock_register SET
@@ -1482,24 +1583,28 @@ elif module == "✏️ Edit / Manage Entries":
                             total_sales_amount=?, closing_amount=?, closing_stock=?, dip_diff=?,
                             actual_stock=?, actual_amount=?
                            WHERE id=?""",
-                        (str(s_date), s_item, s_op_stock, s_op_rate, s_op_amt,
-                         s_p_qty, s_p_rate, s_p_amt, s_tot_p, s_avg, s_avail,
-                         s_s_qty, s_s_rate, s_s_amt, s_tot_s_amt, s_close_amt,
-                         s_close_stock, s_dip, s_actual, s_act_amt, s_id))
-                    st.success(f"✅ Stock Entry ID {s_id} updated.")
+                        (str(n_date), n_fuel, n_op_stock, n_rate, _op_amount,
+                         n_pq, n_pr, _p_amount, _tot_p, _avg, _avail,
+                         n_sq, n_sr, _s_amt, _ts_amt, _c_amt, _c_stock,
+                         n_dip, _act_stock, _act_amt, int(sid)))
+                    clear_data_caches()
+                    st.success(f"✅ Stock Entry ID {sid} updated.")
                     st.rerun()
 
             else:
-                st.warning(f"You are about to permanently delete Stock Entry ID {s_id} ({s_rec['entry_date']} / {s_rec['item_type']}).")
-                s_sure = st.checkbox("Yes, I am sure — delete this stock entry permanently", key=f"ssure_{s_id}")
-                if st.button("🗑️ Delete Stock Entry", disabled=not s_sure, key=f"sdel_{s_id}"):
-                    execute_query("DELETE FROM stock_register WHERE id = ?", (s_id,))
-                    st.success(f"✅ Stock Entry ID {s_id} permanently deleted.")
+                st.warning(f"You are about to delete: {picked_label}")
+                sure = st.checkbox("Yes, I am sure", key=f"sure_stock_{sid}")
+                if st.button("🗑️ Delete Stock Entry Permanently", disabled=not sure, use_container_width=True):
+                    execute_query("DELETE FROM stock_register WHERE id = ?", (int(sid),))
+                    resequence_ids("stock_register")
+                    clear_data_caches()
+                    st.success(f"✅ Stock Entry ID {sid} deleted and IDs re-sequenced.")
                     st.rerun()
 
         st.markdown("---")
-        if st.button("🔢 Re-sequence Stock Entry IDs (1,2,3...)"):
+        if st.button("🔢 Re-sequence all Stock IDs (1,2,3...)"):
             resequence_ids("stock_register")
+            clear_data_caches()
             st.success("Stock IDs re-sequenced in date order.")
             st.rerun()
 
@@ -1545,7 +1650,7 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
             with c2:
                 op_bal = blank_number("Opening Balance (Rs.)")
                 phone = st.text_input("Phone Number")
-            add_it = st.form_submit_button("➕ Save Party")
+            add_it = st.form_submit_button("➕ Save Party", use_container_width=True)
 
         if add_it:
             if not name.strip():
@@ -1554,11 +1659,11 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                 try:
                     execute_query("INSERT INTO parties (name,type,opening_balance,phone) VALUES (?,?,?,?)",
                                   (name.strip(), p_type, op_bal, phone))
-                    _cached_party_names.clear()
+                    clear_data_caches()
                     st.success(f"✅ Party '{name}' added.")
                     st.rerun()
                 except Exception:
-                    st.error("⚠️ A party with this name already exists.")
+                    st.error("⚠️ A party with this name already exists or query error.")
 
     elif action == "✏️ Edit Party":
         allp = fetch_parties()
@@ -1574,7 +1679,7 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                                         index=0 if row["Type"] == "Customer" else 1)
                 new_bal = c2.number_input("Opening Balance", value=float(row["Opening Balance"] or 0.0), step=100.0)
                 new_phone = c2.text_input("Phone", value=row["Phone"] or "")
-                upd = st.form_submit_button("💾 Update Party")
+                upd = st.form_submit_button("💾 Update Party", use_container_width=True)
 
             if upd:
                 if not new_name.strip():
@@ -1585,7 +1690,7 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
                                       (new_name.strip(), new_type, sel))
                         execute_query("UPDATE parties SET name=?, type=?, opening_balance=?, phone=? WHERE name=?",
                                       (new_name.strip(), new_type, new_bal, new_phone, sel))
-                        _cached_party_names.clear()
+                        clear_data_caches()
                         st.success(f"✅ Party '{sel}' updated.")
                         st.rerun()
                     except Exception:
@@ -1602,9 +1707,9 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
             if cnt:
                 st.warning(f"⚠️ This party has {cnt} ledger entries. Deleting the party keeps those entries.")
             sure = st.checkbox(f"Yes, remove '{to_del}'", key=f"sure_party_{to_del}")
-            if st.button("❌ Confirm Delete Party", disabled=not sure):
+            if st.button("❌ Confirm Delete Party", disabled=not sure, use_container_width=True):
                 execute_query("DELETE FROM parties WHERE name = ?", (to_del,))
-                _cached_party_names.clear()
+                clear_data_caches()
                 st.success(f"✅ Party '{to_del}' removed.")
                 st.rerun()
 
@@ -1632,7 +1737,7 @@ elif module == "💾 Backup & System Recovery":
 
     if up is not None:
         sure = st.checkbox("I understand this will replace all current data")
-        if st.button("⚠️ Confirm System Restore", disabled=not sure):
+        if st.button("⚠️ Confirm System Restore", disabled=not sure, use_container_width=True):
             data = json.load(up)
             execute_query("DELETE FROM parties")
             execute_query("DELETE FROM stock_register")
@@ -1662,6 +1767,6 @@ elif module == "💾 Backup & System Recovery":
                      l.get("debit", 0.0), l.get("credit", 0.0), l.get("description", ""),
                      l.get("voucher_no")))
 
-            _cached_party_names.clear()
+            clear_data_caches()
             st.success("✅ System restored successfully.")
             st.rerun()
