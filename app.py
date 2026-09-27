@@ -33,8 +33,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Session persistence: browser tab reload pe session rahe, close pe logout
-# Using sessionStorage: survives refresh, cleared on tab/browser close.
 components.html(
     """
     <script>
@@ -42,16 +40,13 @@ components.html(
         const KEY = "fd_cng_auth_flag";
         try {
             const params = new URLSearchParams(window.parent.location.search);
-            // If streamlit set authed=1, mark sessionStorage
             if (params.get("authed") === "1") {
                 sessionStorage.setItem(KEY, "1");
-                // Clean the URL to hide the flag
                 const url = new URL(window.parent.location.href);
                 url.searchParams.delete("authed");
                 window.parent.history.replaceState({}, "", url.toString());
             }
         } catch (e) {}
-        // Keep title fixed
         function fixTitle() {
             try { if (window.parent && window.parent.document) {
                 window.parent.document.title = "FD CNG Fuel Station";
@@ -128,8 +123,6 @@ st.markdown(
         }
         button[data-baseweb="tab"] { font-weight: 700; }
         [data-testid="stDataFrame"] { border: 1px solid #e3e8ef; border-radius: 8px; overflow: hidden; }
-        /* Speed: reduce animation jank */
-        * { animation-duration: 0s !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -160,7 +153,6 @@ def login_screen():
             if st.form_submit_button("🔑 Login", use_container_width=True):
                 if username == USERNAME and password == PASSWORD:
                     st.session_state["authenticated"] = True
-                    # Mark sessionStorage so a browser reload does not log out.
                     st.markdown(
                         """<script>
                         try { sessionStorage.setItem("fd_cng_auth_flag", "1"); } catch(e) {}
@@ -172,9 +164,7 @@ def login_screen():
                     st.error("Invalid Username or Password!")
 
 
-# Read sessionStorage flag once per browser session via query param trick.
-# If sessionStorage flag set but session_state cleared (page refresh), restore.
-_read_flag = components.html(
+components.html(
     """
     <script>
     (function(){
@@ -363,8 +353,6 @@ def payload_token(*parts) -> str:
 
 
 def already_saved(token: str) -> bool:
-    """Guard against accidental double-click duplicates, but auto-clears per session
-    so that genuine repeat entries (same values on different days) still work."""
     saved = st.session_state.setdefault("saved_tokens", set())
     if token in saved:
         return True
@@ -538,7 +526,6 @@ def fmt_ddmmyyyy(d) -> str:
 
 
 def clear_data_caches():
-    """Clear cached data so table views reflect latest writes instantly."""
     try:
         cached_fetch_parties.clear()
     except Exception:
@@ -821,7 +808,6 @@ module = st.sidebar.radio(
 )
 
 if st.sidebar.button("🚪 Logout"):
-    # Clear the sessionStorage flag so browser reload does not auto re-login.
     st.markdown(
         """<script>
         try { sessionStorage.removeItem("fd_cng_auth_flag"); } catch(e) {}
@@ -1022,6 +1008,7 @@ elif module == "🛢️ Daily Stock Register":
     st.caption(f"Auto-filled Opening Stock for {item_type} = {suggested_opening:,.2f} Ltrs  |  "
                f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
 
+    # Form with submit button only — Enter key will NOT submit
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1093,7 +1080,6 @@ elif module == "🛢️ Daily Stock Register":
             ("★ Final Closing Stock (Next Opening)", f"{k['final_closing']:,.2f} Ltrs"),
         ])
 
-    # Direct save (no Review step)
     if save_stock:
         if not any([p_qty, s_qty, dip_input]) and op_stock == 0 and suggested_opening == 0:
             st.warning("Nothing to save — enter at least Purchase / Sales / Dip.")
@@ -1224,7 +1210,6 @@ elif module == "💳 Party Daily Sale & Credit Entry":
             ("★ Received — Cash Out (Credit)", f"Rs. {credit:,.2f}"),
         ])
 
-    # Direct save
     if save_cust:
         if party_name == "None":
             st.error("Please select a customer.")
@@ -1392,7 +1377,8 @@ elif module == "✏️ Edit / Manage Entries":
         if search.strip():
             q += " AND (IFNULL(description,'') LIKE ? OR txn_date LIKE ?)"
             params += [f"%{search}%", f"%{search}%"]
-        q += " ORDER BY txn_date DESC, id DESC"
+        # ✅ ASC order: oldest first, newest at bottom
+        q += " ORDER BY txn_date ASC, id ASC"
 
         rows = read_df(q, params=params)
 
@@ -1463,7 +1449,6 @@ elif module == "✏️ Edit / Manage Entries":
                 if st.button("🗑️ Delete Entry Permanently", disabled=not sure, use_container_width=True):
                     execute_query("DELETE FROM ledger WHERE id = ?", (int(entry_id),))
                     resequence_ids("ledger")
-                    # Clear duplicate-guard cache so a fresh entry with same values can be saved again.
                     st.session_state.pop("saved_tokens", None)
                     clear_data_caches()
                     st.success(f"✅ Entry ID {entry_id} deleted and IDs re-sequenced.")
@@ -1481,12 +1466,13 @@ elif module == "✏️ Edit / Manage Entries":
     else:
         s1, s2 = st.columns([1, 3])
         item_filter = s1.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="edit_stock_filter")
-        s2.markdown("")  # spacing
+        s2.markdown("")
 
+        # ✅ ASC order: oldest first, newest at bottom
         if item_filter == "All":
-            rows = read_df("SELECT * FROM stock_register ORDER BY entry_date DESC, id DESC")
+            rows = read_df("SELECT * FROM stock_register ORDER BY entry_date ASC, id ASC")
         else:
-            rows = read_df("SELECT * FROM stock_register WHERE item_type=? ORDER BY entry_date DESC, id DESC",
+            rows = read_df("SELECT * FROM stock_register WHERE item_type=? ORDER BY entry_date ASC, id ASC",
                            params=(item_filter,))
 
         if rows.empty:
