@@ -78,6 +78,28 @@ st.markdown(
             background:#fff7e6; border:1px solid #f57c00; border-left: 6px solid #f57c00;
             border-radius:10px; padding:14px; margin-bottom: 10px;
         }
+        .live-preview {
+            background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+            border: 2px solid #1c8b4e; border-radius: 10px;
+            padding: 14px 18px; margin: 10px 0 16px 0;
+            box-shadow: 0 2px 8px rgba(28,139,78,.15);
+        }
+        .live-preview h5 {
+            margin: 0 0 10px 0; color: #0b3d24; font-size: 13px;
+            font-weight: 800; text-transform: uppercase; letter-spacing: .8px;
+        }
+        .live-preview table { width: 100%; border-collapse: collapse; }
+        .live-preview td {
+            padding: 5px 8px; font-size: 13.5px; color: #0b3d24;
+            border-bottom: 1px dashed #a7d4b8;
+        }
+        .live-preview td:last-child { text-align: right; font-weight: 700; color: #0b5d34; }
+        .live-preview td:first-child { color: #166534; font-weight: 600; }
+        .live-preview tr:last-child td { border-bottom: none; }
+        .live-preview .highlight td {
+            background: #fef3c7; font-weight: 800; color: #92400e;
+            border-bottom: 2px solid #f59e0b;
+        }
         div.stButton > button, div.stFormSubmitButton > button, div.stDownloadButton > button {
             background: linear-gradient(90deg, #1c8b4e, #2e7d32);
             color: #ffffff; border: none; border-radius: 8px; font-weight: 700;
@@ -132,21 +154,11 @@ if not st.session_state["authenticated"]:
 # ==========================================
 DB_FILE = "fd_cng_fuel_station.db"
 
-# A single shared lock so concurrent Streamlit sessions don't hit the
-# same underlying connection at once (sqlite3 connections aren't safe
-# for concurrent use across threads).
 _db_lock = threading.Lock()
 
 
 @st.cache_resource(show_spinner=False)
 def get_db_connection():
-    """Turso Cloud connection using secrets with fallback to local SQLite.
-
-    This is cached with st.cache_resource so the SAME connection/client is
-    reused across every rerun and every query. Previously a brand-new
-    connection (a fresh network round-trip for Turso) was opened and closed
-    for every single query, which is what made the app feel slow.
-    """
     turso_url = st.secrets.get("turso", {}).get("TURSO_DATABASE_URL")
     turso_token = st.secrets.get("turso", {}).get("TURSO_AUTH_TOKEN")
 
@@ -158,7 +170,6 @@ def get_db_connection():
         except Exception as e:
             st.error(f"⚠️ Turso Sync Error: {e}. Falling back to local SQLite.")
 
-    # Fallback to local SQLite
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -274,10 +285,6 @@ def init_db():
 
 @st.cache_resource(show_spinner=False)
 def _init_db_once():
-    # Streamlit reruns the whole script on every click/interaction, so
-    # without this guard init_db() (several CREATE TABLE + COUNT queries)
-    # was re-running on every single rerun. It only needs to run once
-    # per app process.
     init_db()
     return True
 
@@ -325,9 +332,6 @@ def calculate_party_balances(party_type: str) -> pd.DataFrame:
         return pd.DataFrame()
     parties["opening_balance"] = parties["opening_balance"].fillna(0.0)
 
-    # Aggregate per-party totals in SQL instead of pulling every ledger row
-    # and looping/filtering per party in Python — much faster as the
-    # ledger grows.
     ledger_sums = read_df(
         """SELECT party_name, SUM(debit) AS total_debit, SUM(credit) AS total_credit
            FROM ledger WHERE party_type = ? GROUP BY party_name""",
@@ -358,17 +362,12 @@ def resequence_ids(table: str):
     conn = get_db_connection()
 
     if _is_libsql(conn):
-        # Turso client: no local executemany, keep the per-row calls but
-        # they now reuse the single cached connection instead of opening
-        # a brand-new one for every statement.
         with _db_lock:
             for old in ids:
                 conn.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (old + 1_000_000, old))
             for new, old in enumerate(ids, start=1):
                 conn.execute(f"UPDATE {table} SET id = ? WHERE id = ?", (new, old + 1_000_000))
     else:
-        # Local SQLite: batch everything into two executemany calls inside
-        # one transaction instead of N individual round trips.
         with _db_lock:
             cur = conn.cursor()
             cur.executemany(
@@ -380,6 +379,20 @@ def resequence_ids(table: str):
                 [(new, old + 1_000_000) for new, old in enumerate(ids, start=1)],
             )
             conn.commit()
+
+
+def safe_float(raw, label="", min_value=None):
+    """Live conversion helper for text inputs."""
+    raw = (raw or "").strip()
+    if raw == "":
+        return 0.0
+    try:
+        val = float(raw)
+    except ValueError:
+        return None  # signals invalid
+    if min_value is not None and val < min_value:
+        return min_value
+    return val
 
 
 def blank_number(label: str, min_value=None, help=None, key=None) -> float:
@@ -423,6 +436,15 @@ def last_closing_stock(item_type: str) -> float:
         return 0.0
     row = df.iloc[0]
     return (row["closing_stock"] or 0.0) + (row["dip_diff"] or 0.0)
+
+
+def last_avg_rate(item_type: str) -> float:
+    """Fetch last closing average rate for auto-fill of opening rate."""
+    df = read_df("""SELECT avg_rate FROM stock_register
+                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""", params=(item_type,))
+    if df.empty:
+        return 0.0
+    return float(df.iloc[0]["avg_rate"] or 0.0)
 
 
 def next_voucher_no() -> str:
@@ -555,12 +577,143 @@ def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: 
     components.html(trigger_html, height=60)
 
 
+def render_print_stock(from_date, to_date, item_filter="All"):
+    """Print stock register between date range."""
+    q = """SELECT id, entry_date, item_type, opening_stock, rate, purchase_qty, purchase_rate,
+                  sales_qty, sales_rate, avg_rate, closing_stock, actual_stock, dip_diff
+           FROM stock_register WHERE entry_date BETWEEN ? AND ?"""
+    params = [str(from_date), str(to_date)]
+    if item_filter != "All":
+        q += " AND item_type = ?"
+        params.append(item_filter)
+    q += " ORDER BY entry_date ASC, id ASC"
+
+    df = read_df(q, params=params)
+
+    rows_html = ""
+    for i, (_, r) in enumerate(df.iterrows(), start=1):
+        dip_color = "#dc2626" if (r['dip_diff'] or 0) < 0 else ("#16a34a" if (r['dip_diff'] or 0) > 0 else "#0b3d24")
+        rows_html += f"""
+        <tr>
+            <td>{i}</td>
+            <td>{fmt_ddmmyyyy(r['entry_date'])}</td>
+            <td>{r['item_type']}</td>
+            <td class="num">{(r['opening_stock'] or 0):,.2f}</td>
+            <td class="num">{(r['rate'] or 0):,.2f}</td>
+            <td class="num">{(r['purchase_qty'] or 0):,.2f}</td>
+            <td class="num">{(r['purchase_rate'] or 0):,.2f}</td>
+            <td class="num">{(r['sales_qty'] or 0):,.2f}</td>
+            <td class="num">{(r['sales_rate'] or 0):,.2f}</td>
+            <td class="num">{(r['avg_rate'] or 0):,.4f}</td>
+            <td class="num">{(r['closing_stock'] or 0):,.2f}</td>
+            <td class="num" style="color:{dip_color};font-weight:700;">{(r['dip_diff'] or 0):+,.2f}</td>
+            <td class="num">{(r['actual_stock'] or 0):,.2f}</td>
+        </tr>"""
+
+    from_str = fmt_ddmmyyyy(from_date)
+    to_str = fmt_ddmmyyyy(to_date)
+
+    print_doc = f"""<!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="utf-8">
+    <title>Stock Register {from_str} to {to_str}</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{ font-family: Arial, Helvetica, sans-serif; color:#0b3d24; margin:0; padding:0; }}
+        .sheet {{ padding: 16px 20px; }}
+        .head {{
+            background: linear-gradient(90deg,#0b5d34,#2e7d32);
+            color:#fff; padding:14px 18px; border-radius:8px; border-left:8px solid #f57c00;
+            margin-bottom:14px;
+        }}
+        .head h2 {{ margin:0; font-size:20px; }}
+        .head p {{ margin:2px 0 0; font-size:13px; opacity:.9; }}
+        .info {{ display:flex; gap:20px; margin-bottom:12px; font-size:13px; }}
+        .info div {{ background:#f4f7f5; border:1px solid #e3e8ef; border-radius:6px; padding:6px 12px; }}
+        table {{ width:100%; border-collapse: collapse; font-size:11.5px; }}
+        th {{ background:#0b3d24; color:#fff; padding:6px 6px; text-align:left; }}
+        td {{ padding:5px 6px; border-bottom:1px solid #e3e8ef; }}
+        td.num, th.num {{ text-align:right; }}
+        tr:nth-child(even) {{ background:#f8faf9; }}
+        @page {{ margin: 8mm; size: auto landscape; }}
+    </style>
+    </head>
+    <body>
+        <div class="sheet">
+            <div class="head">
+                <h2>⛽ FD CNG Fuel Station — Daily Stock Register</h2>
+                <p>Report Period: {from_str} to {to_str} &nbsp;|&nbsp; Fuel Filter: {item_filter}</p>
+            </div>
+            <div class="info">
+                <div><b>Total Entries:</b> {len(df)}</div>
+                <div><b>Generated:</b> {datetime.now().strftime('%d-%m-%Y %H:%M')}</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Sr.</th><th>Date</th><th>Fuel</th>
+                        <th class="num">Opening</th><th class="num">Op Rate</th>
+                        <th class="num">Purch Qty</th><th class="num">Purch Rate</th>
+                        <th class="num">Sales Qty</th><th class="num">Sales Rate</th>
+                        <th class="num">Avg Rate</th><th class="num">Closing</th>
+                        <th class="num">Dip Diff</th><th class="num">Actual</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rows_html if rows_html else '<tr><td colspan="13" style="text-align:center;">No entries in this range</td></tr>'}
+                </tbody>
+            </table>
+        </div>
+        <script>
+            window.onload = function () {{
+                window.focus();
+                window.print();
+            }};
+            window.onafterprint = function () {{ window.close(); }};
+        </script>
+    </body>
+    </html>
+    """
+
+    safe_doc = json.dumps(print_doc).replace("</script>", "<\\/script>")
+
+    trigger_html = f"""
+    <button id="printStockBtn" style="
+        background:linear-gradient(90deg,#1c8b4e,#2e7d32); color:#fff; border:none;
+        padding:10px 22px; border-radius:8px; font-weight:bold; font-size:14px;
+        cursor:pointer;">🖨️ Print Stock Register</button>
+    <script>
+        document.getElementById('printStockBtn').onclick = function () {{
+            var doc = {safe_doc};
+            var w = window.open('', '_blank');
+            if (w) {{
+                w.document.open();
+                w.document.write(doc);
+                w.document.close();
+            }}
+        }};
+    </script>
+    """
+    components.html(trigger_html, height=60)
+
+
+def live_preview(rows):
+    """Show live preview box with key-value rows."""
+    html = "<div class='live-preview'><h5>⚡ Live Preview</h5><table>"
+    for k, v in rows:
+        cls = " class='highlight'" if k.startswith("★") else ""
+        k_clean = k.replace("★ ", "")
+        html += f"<tr{cls}><td>{k_clean}</td><td>{v}</td></tr>"
+    html += "</table></div>"
+    st.markdown(html, unsafe_allow_html=True)
+
+
 # ==========================================
 # 5. SIDEBAR NAVIGATION
 # ==========================================
 st.sidebar.markdown("## ⛽ FD CNG Station")
 
-# Turso Status Indicator
 turso_configured = bool(st.secrets.get("turso", {}).get("TURSO_DATABASE_URL"))
 if turso_configured and HAS_TURSO:
     st.sidebar.success("☁️ Turso Cloud: Connected")
@@ -747,34 +900,53 @@ elif module == "📄 Customer/Vendor Statements & Print":
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER
+# MODULE 4: DAILY STOCK REGISTER (REVISED)
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
 
-    st.caption("Dip Difference = Shortage/Excess amount entered during physical dip check. Minus means shortage, plus means excess.")
+    st.caption("Dip Difference = Shortage/Excess amount entered during physical dip check. Minus means shortage, plus means excess. "
+               "Opening Stock aur Opening Rate dono last entry se auto-update hote hain.")
 
     item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
     suggested_opening = last_closing_stock(item_type)
-    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = last saved Final Closing Stock ({suggested_opening:,.2f} Ltrs).")
+    suggested_rate = last_avg_rate(item_type)
+    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = {suggested_opening:,.2f} Ltrs  |  "
+               f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
+
+    # Use session keys for reset behavior
+    if "stock_form_version" not in st.session_state:
+        st.session_state["stock_form_version"] = 0
+
+    fver = st.session_state["stock_form_version"]
 
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
-            e_date = st.date_input("Entry Date", date.today(), format="DD-MM-YYYY")
-            st.text_input("Fuel Item", value=item_type, disabled=True)
-            op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening), step=1.0)
-            op_rate = blank_number("Opening Rate", min_value=0.0)
+            e_date = st.date_input("Entry Date", date.today(), format="DD-MM-YYYY", key=f"stk_date_{fver}")
+            st.text_input("Fuel Item", value=item_type, disabled=True, key=f"stk_item_{fver}")
+            op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening),
+                                        step=1.0, key=f"stk_opstk_{fver}")
+            op_rate_str = st.text_input("Opening Rate", value=f"{suggested_rate:.4f}" if suggested_rate else "",
+                                         placeholder="0", key=f"stk_oprate_{fver}")
         with c2:
-            p_qty = blank_number("Purchase Qty (Ltrs)", min_value=0.0)
-            p_rate = blank_number("Purchase Rate", min_value=0.0)
-            s_qty = blank_number("Sales Qty (Ltrs)", min_value=0.0)
-            s_rate = blank_number("Sales Rate", min_value=0.0)
+            p_qty_str = st.text_input("Purchase Qty (Ltrs)", value="", placeholder="0", key=f"stk_pqty_{fver}")
+            p_rate_str = st.text_input("Purchase Rate", value="", placeholder="0", key=f"stk_prate_{fver}")
+            s_qty_str = st.text_input("Sales Qty (Ltrs)", value="", placeholder="0", key=f"stk_sqty_{fver}")
+            s_rate_str = st.text_input("Sales Rate", value="", placeholder="0", key=f"stk_srate_{fver}")
         with c3:
-            dip_checked = st.checkbox("Physical Dip Check done today?", value=True)
-            dip_input = blank_number("Dip Shortage / Excess (+/− Ltrs)")
+            dip_checked = st.checkbox("Physical Dip Check done today?", value=True, key=f"stk_dipchk_{fver}")
+            dip_str = st.text_input("Dip Shortage / Excess (+/− Ltrs)", value="", placeholder="0", key=f"stk_dip_{fver}")
 
-        review_stock = st.form_submit_button("👁️ Review Entry")
+        review_stock = st.form_submit_button("👁️ Review & Save Stock Entry")
+
+    # Live parse of typed values
+    op_rate = safe_float(op_rate_str) or 0.0
+    p_qty = safe_float(p_qty_str) or 0.0
+    p_rate = safe_float(p_rate_str) or 0.0
+    s_qty = safe_float(s_qty_str) or 0.0
+    s_rate = safe_float(s_rate_str) or 0.0
+    dip_input = safe_float(dip_str) or 0.0
 
     def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked):
         op_amount = op_stock * op_rate
@@ -797,6 +969,29 @@ elif module == "🛢️ Daily Stock Register":
                     dip_diff=dip_diff, dip_amount=dip_amount, act_amount=act_amount,
                     actual_stock=actual_stock, final_closing=final_closing)
 
+    k = stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked)
+
+    # ✅ Live Preview (always visible)
+    if any([op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input]):
+        sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
+        live_preview([
+            ("Date", fmt_ddmmyyyy(e_date)),
+            ("Fuel Item", item_type),
+            ("Opening Amount", f"Rs. {k['op_amount']:,.2f}"),
+            ("Purchase Amount", f"Rs. {k['p_amount']:,.2f}"),
+            ("Total Purchase Amount", f"Rs. {k['tot_p_amount']:,.2f}"),
+            ("Available Stock", f"{k['avail']:,.2f} Ltrs"),
+            ("★ Average Rate", f"Rs. {k['avg_rate']:,.4f}"),
+            ("Sales Amount (at Sales Rate)", f"Rs. {k['s_amount']:,.2f}"),
+            ("Total Sales Amount (at Avg)", f"Rs. {k['tot_s_amount']:,.2f}"),
+            ("Closing Amount", f"Rs. {k['closing_amount']:,.2f}"),
+            ("Closing Stock", f"{k['closing_stock']:,.2f} Ltrs"),
+            ("Dip Difference", f"{k['dip_diff']:+,.2f} Ltrs  ({sign})"),
+            ("Dip Diff Amount", f"Rs. {k['dip_amount']:+,.2f}"),
+            ("Actual Stock", f"{k['actual_stock']:,.2f} Ltrs"),
+            ("★ Final Closing Stock (Next Opening)", f"{k['final_closing']:,.2f} Ltrs"),
+        ])
+
     if review_stock:
         st.session_state["stock_pending"] = dict(
             e_date=str(e_date), item_type=item_type, op_stock=op_stock, op_rate=op_rate,
@@ -806,22 +1001,12 @@ elif module == "🛢️ Daily Stock Register":
 
     pend = st.session_state.get("stock_pending")
     if pend:
-        k = stock_calc(pend["op_stock"], pend["op_rate"], pend["p_qty"], pend["p_rate"],
-                       pend["s_qty"], pend["s_rate"], pend["dip_input"], pend["dip_checked"])
-        st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
-        r1, r2, r3 = st.columns(3)
-        r1.write(f"**Date:** {pend['e_date']}")
-        r1.write(f"**Fuel:** {pend['item_type']}")
-        r1.write(f"**Available Stock:** {k['avail']:,.2f} Ltrs")
-        r2.write(f"**Average Rate:** Rs. {k['avg_rate']:,.4f}")
-        r2.write(f"**Book Closing Stock:** {k['closing_stock']:,.2f} Ltrs")
-        r2.write(f"**Actual Dip Stock:** {k['actual_stock']:,.2f} Ltrs")
-        sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
-        r3.write(f"**Dip Difference:** {k['dip_diff']:+,.2f} Ltrs  → {sign}")
-        r3.write(f"**Dip Diff Amount:** Rs. {k['dip_amount']:+,.2f}")
-        r3.write(f"**Closing Amount:** Rs. {k['closing_amount']:,.2f}")
+        kp = stock_calc(pend["op_stock"], pend["op_rate"], pend["p_qty"], pend["p_rate"],
+                        pend["s_qty"], pend["s_rate"], pend["dip_input"], pend["dip_checked"])
+        st.markdown("<div class='review-box'><b>🔎 Confirm Entry</b></div>", unsafe_allow_html=True)
 
-        dup_df = read_df("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?", params=(pend["e_date"], pend["item_type"]))
+        dup_df = read_df("SELECT COUNT(*) c FROM stock_register WHERE entry_date=? AND item_type=?",
+                         params=(pend["e_date"], pend["item_type"]))
         dup = dup_df.iloc[0]["c"] if not dup_df.empty else 0
 
         if dup:
@@ -846,16 +1031,20 @@ elif module == "🛢️ Daily Stock Register":
                         purchase_amount,total_purchase_amount,avg_rate,available_stock,sales_qty,sales_rate,
                         sales_amount,total_sales_amount,closing_amount,closing_stock,dip_diff,actual_stock,actual_amount)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], k["op_amount"],
-                     pend["p_qty"], pend["p_rate"], k["p_amount"], k["tot_p_amount"], k["avg_rate"],
-                     k["avail"], pend["s_qty"], pend["s_rate"], k["s_amount"], k["tot_s_amount"],
-                     k["closing_amount"], k["closing_stock"], k["dip_diff"], k["actual_stock"], k["act_amount"]),
+                    (pend["e_date"], pend["item_type"], pend["op_stock"], pend["op_rate"], kp["op_amount"],
+                     pend["p_qty"], pend["p_rate"], kp["p_amount"], kp["tot_p_amount"], kp["avg_rate"],
+                     kp["avail"], pend["s_qty"], pend["s_rate"], kp["s_amount"], kp["tot_s_amount"],
+                     kp["closing_amount"], kp["closing_stock"], kp["dip_diff"], kp["actual_stock"], kp["act_amount"]),
                 )
                 st.session_state.pop("stock_pending", None)
-                st.success("✅ Daily stock entry saved.")
+                # 🔄 Reset form: bump version to clear all text inputs
+                st.session_state["stock_form_version"] += 1
+                st.success("✅ Daily stock entry saved. Form cleared — next entry ke liye ready.")
                 st.rerun()
 
-    st.markdown("### 📊 Existing Stock Records")
+    st.markdown("### 📊 Existing Stock Records (Purani Upar, Nayi Neeche — Date Wise)")
+
+    # ✅ ASC order: old entries first, new entries at bottom
     stock_df = read_df(
         """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
                   opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
@@ -864,7 +1053,7 @@ elif module == "🛢️ Daily Stock Register":
                   actual_stock AS [Actual Dip Stock], dip_diff AS [Dip Difference],
                   ROUND(dip_diff * avg_rate, 2) AS [Dip Diff Amount],
                   ROUND(closing_stock + dip_diff, 2) AS [Final Closing Stock (Next Opening)]
-           FROM stock_register ORDER BY entry_date DESC, id DESC""")
+           FROM stock_register ORDER BY entry_date ASC, id ASC""")
 
     if not stock_df.empty:
         stock_df["Dip Status"] = stock_df["Dip Difference"].apply(
@@ -872,6 +1061,16 @@ elif module == "🛢️ Daily Stock Register":
         st.dataframe(sr_index(stock_df), use_container_width=True)
         download_csv(sr_index(stock_df), "stock_register.csv")
 
+        st.markdown("---")
+        st.markdown("### 🖨️ Print Stock Register (Date Range)")
+        pp1, pp2, pp3 = st.columns(3)
+        pr_from = pp1.date_input("Print From Date", date(date.today().year, 1, 1), format="DD-MM-YYYY", key="stk_pr_from")
+        pr_to = pp2.date_input("Print To Date", date.today(), format="DD-MM-YYYY", key="stk_pr_to")
+        pr_item = pp3.selectbox("Fuel Filter", ["All", "Petrol", "Diesel"], key="stk_pr_item")
+        if st.button("🖨️ Generate Print Preview", key="stk_print_btn"):
+            render_print_stock(pr_from, pr_to, pr_item)
+
+        st.markdown("---")
         st.markdown("#### 🗑️ Delete a Stock Entry")
         ids = stock_df["Entry ID"].tolist()
         del_id = st.selectbox("Select Entry ID to delete", ids)
@@ -902,41 +1101,65 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         key="cust_entry_kind",
     )
 
+    if "cust_form_ver" not in st.session_state:
+        st.session_state["cust_form_ver"] = 0
+    cver = st.session_state["cust_form_ver"]
+
     with st.form("credit_sale_form"):
         c1, c2 = st.columns(2)
         if entry_kind.startswith("🧾"):
             with c1:
-                txn_date = st.date_input("Sale / Delivery Date", date.today(), format="DD-MM-YYYY")
-                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
-                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Sale / Delivery Date", date.today(), format="DD-MM-YYYY", key=f"c_date_{cver}")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"], key=f"c_party_{cver}")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key=f"c_fuel_{cver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"c_vno_{cver}")
             with c2:
-                qty = blank_number("Qty (Ltrs)", min_value=0.0)
-                rate = blank_number("Rate", min_value=0.0)
-                desc = st.text_input("Description / Slip No.")
+                qty_str = st.text_input("Qty (Ltrs)", value="", placeholder="0", key=f"c_qty_{cver}")
+                rate_str = st.text_input("Rate", value="", placeholder="0", key=f"c_rate_{cver}")
+                desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
             payment = 0.0
         elif entry_kind.startswith("💵"):
             with c1:
-                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY")
-                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY", key=f"c_date_{cver}")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"], key=f"c_party_{cver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"c_vno_{cver}")
             with c2:
-                payment = blank_number("Amount Received (Rs.)", min_value=0.0)
-                desc = st.text_input("Description / Slip No.")
+                pay_str = st.text_input("Amount Received (Rs.)", value="", placeholder="0", key=f"c_pay_{cver}")
+                desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
             fuel = "Cash Payment/Voucher"
-            qty, rate = 0.0, 0.0
+            qty_str, rate_str = "", ""
+            payment = safe_float(pay_str) or 0.0
         else:
             with c1:
-                txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY")
-                party_name = st.selectbox("Customer Name", customers if customers else ["None"])
-                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY", key=f"c_date_{cver}")
+                party_name = st.selectbox("Customer Name", customers if customers else ["None"], key=f"c_party_{cver}")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key=f"c_fuel_{cver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"c_vno_{cver}")
             with c2:
-                qty = blank_number("Qty (Ltrs)", min_value=0.0)
-                rate = blank_number("Rate", min_value=0.0)
-                payment = blank_number("Amount Received (Rs.)", min_value=0.0)
-                desc = st.text_input("Description / Slip No.")
+                qty_str = st.text_input("Qty (Ltrs)", value="", placeholder="0", key=f"c_qty_{cver}")
+                rate_str = st.text_input("Rate", value="", placeholder="0", key=f"c_rate_{cver}")
+                pay_str = st.text_input("Amount Received (Rs.)", value="", placeholder="0", key=f"c_pay_{cver}")
+                desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
+            payment = safe_float(pay_str) or 0.0
         review_cust = st.form_submit_button("👁️ Review Entry")
+
+    # Live preview
+    qty = safe_float(qty_str) or 0.0
+    rate = safe_float(rate_str) or 0.0
+    debit = qty * rate if fuel != "Cash Payment/Voucher" else 0.0
+    credit = payment
+
+    if any([qty, rate, payment]):
+        live_preview([
+            ("Date", fmt_ddmmyyyy(txn_date)),
+            ("Customer", party_name),
+            ("Fuel", fuel),
+            ("Voucher No.", voucher_no),
+            ("Qty (Ltrs)", f"{qty:,.2f}"),
+            ("Rate", f"{rate:,.2f}"),
+            ("★ Sale — Cash In (Debit)", f"Rs. {debit:,.2f}"),
+            ("★ Received — Cash Out (Credit)", f"Rs. {credit:,.2f}"),
+        ])
 
     if review_cust and party_name != "None":
         st.session_state["cust_pending"] = dict(
@@ -976,6 +1199,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                      None if pend["fuel"] == "Cash Payment/Voucher" else pend["fuel"],
                      pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 st.session_state.pop("cust_pending", None)
+                st.session_state["cust_form_ver"] += 1
                 st.success("✅ Customer transaction saved.")
                 st.rerun()
 
@@ -1015,38 +1239,61 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         key="vend_entry_kind",
     )
 
+    if "vend_form_ver" not in st.session_state:
+        st.session_state["vend_form_ver"] = 0
+    vver = st.session_state["vend_form_ver"]
+
     with st.form("vendor_form"):
         c1, c2 = st.columns(2)
         if entry_kind.startswith("🚛"):
             with c1:
-                txn_date = st.date_input("Tanker Unload / Bill Date", date.today(), format="DD-MM-YYYY")
-                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Tanker Unload / Bill Date", date.today(), format="DD-MM-YYYY", key=f"v_date_{vver}")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key=f"v_fuel_{vver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"v_vno_{vver}")
             with c2:
-                qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
-                rate = blank_number("Purchase Rate", min_value=0.0)
-                desc = st.text_input("Invoice / Tanker No.")
+                qty_str = st.text_input("Qty Received (Ltrs)", value="", placeholder="0", key=f"v_qty_{vver}")
+                rate_str = st.text_input("Purchase Rate", value="", placeholder="0", key=f"v_rate_{vver}")
+                desc = st.text_input("Invoice / Tanker No.", key=f"v_desc_{vver}")
             paid = 0.0
         elif entry_kind.startswith("💵"):
             with c1:
-                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY")
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Payment Date", date.today(), format="DD-MM-YYYY", key=f"v_date_{vver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"v_vno_{vver}")
             with c2:
-                paid = blank_number("Advance / Payment Paid (Rs.)", min_value=0.0)
-                desc = st.text_input("Description")
+                paid_str = st.text_input("Advance / Payment Paid (Rs.)", value="", placeholder="0", key=f"v_paid_{vver}")
+                desc = st.text_input("Description", key=f"v_desc_{vver}")
             fuel = "Direct Payment"
-            qty, rate = 0.0, 0.0
+            qty_str, rate_str = "", ""
+            paid = safe_float(paid_str) or 0.0
         else:
             with c1:
-                txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY")
-                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"])
-                voucher_no = st.text_input("Voucher No.", value=next_voucher_no())
+                txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY", key=f"v_date_{vver}")
+                fuel = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key=f"v_fuel_{vver}")
+                voucher_no = st.text_input("Voucher No.", value=next_voucher_no(), key=f"v_vno_{vver}")
             with c2:
-                qty = blank_number("Qty Received (Ltrs)", min_value=0.0)
-                rate = blank_number("Purchase Rate", min_value=0.0)
-                paid = blank_number("Payment Paid (Rs.)", min_value=0.0)
-                desc = st.text_input("Invoice / Tanker No.")
+                qty_str = st.text_input("Qty Received (Ltrs)", value="", placeholder="0", key=f"v_qty_{vver}")
+                rate_str = st.text_input("Purchase Rate", value="", placeholder="0", key=f"v_rate_{vver}")
+                paid_str = st.text_input("Payment Paid (Rs.)", value="", placeholder="0", key=f"v_paid_{vver}")
+                desc = st.text_input("Invoice / Tanker No.", key=f"v_desc_{vver}")
+            paid = safe_float(paid_str) or 0.0
         review_vend = st.form_submit_button("👁️ Review Entry")
+
+    qty = safe_float(qty_str) or 0.0
+    rate = safe_float(rate_str) or 0.0
+    credit = qty * rate if fuel != "Direct Payment" else 0.0
+    debit = paid
+
+    if any([qty, rate, paid]):
+        live_preview([
+            ("Date", fmt_ddmmyyyy(txn_date)),
+            ("Vendor", vendor_name),
+            ("Fuel", fuel),
+            ("Voucher No.", voucher_no),
+            ("Qty (Ltrs)", f"{qty:,.2f}"),
+            ("Rate", f"{rate:,.2f}"),
+            ("★ Purchase — Cash In (Credit)", f"Rs. {credit:,.2f}"),
+            ("★ Paid — Cash Out (Debit)", f"Rs. {debit:,.2f}"),
+        ])
 
     if review_vend and vendor_name != "None":
         st.session_state["vend_pending"] = dict(
@@ -1086,6 +1333,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                      None if pend["fuel"] == "Direct Payment" else pend["fuel"],
                      pend["qty"], pend["rate"], debit, credit, pend["desc"], pend["voucher_no"] or None))
                 st.session_state.pop("vend_pending", None)
+                st.session_state["vend_form_ver"] += 1
                 st.success("✅ Vendor transaction saved.")
                 st.rerun()
 
