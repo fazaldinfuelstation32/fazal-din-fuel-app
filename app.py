@@ -515,20 +515,8 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
                            file_name=filename, mime="text/csv")
 
 
-# ==========================================
-# ✅ FIXED: Last Entry Info for Auto-fill
-# ==========================================
 def get_last_entry_info(item_type: str) -> dict:
-    """
-    Get the previous entry's closing stock + effective rate for auto-fill.
-    
-    Carry-forward logic:
-      - Opening Stock = last closing_stock + dip_diff
-      - Opening Rate  = last closing_amount / last closing_stock
-                        (fallback: actual_amount/actual_stock)
-                        (fallback: avg_rate)
-                        (fallback: rate)
-    """
+    """Get the previous entry's closing stock + effective rate for auto-fill."""
     df = read_df(
         """SELECT entry_date, closing_stock, dip_diff, closing_amount,
                   actual_stock, actual_amount, avg_rate, rate
@@ -873,6 +861,7 @@ module = st.sidebar.radio(
         "✏️ Edit / Manage Entries",
         "⚖️ Stock vs Sale Month-End Match",
         "⚙️ Master Setup (Parties/Vendors)",
+        "🔧 Fix Old Entries (Recalculate)",
         "💾 Backup & System Recovery",
     ],
 )
@@ -1050,7 +1039,7 @@ elif module == "📄 Customer/Vendor Statements & Print":
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER (FIXED)
+# MODULE 4: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
@@ -1061,7 +1050,6 @@ elif module == "🛢️ Daily Stock Register":
 
     item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
 
-    # 🔄 Manual refresh button (in case auto-fill needs to be forced)
     col_ref, col_spacer = st.columns([1, 5])
     with col_ref:
         if st.button("🔄 Refresh Auto-fill", key="refresh_autofill_btn"):
@@ -1073,7 +1061,6 @@ elif module == "🛢️ Daily Stock Register":
 
     fver = st.session_state["stock_form_version"]
 
-    # ✅ Auto-fill logic — always recalculate on version/fuel change
     cache_key = f"stk_{item_type}_{fver}"
     if st.session_state.get("stk_last_key") != cache_key:
         info = get_last_entry_info(item_type)
@@ -1086,7 +1073,6 @@ elif module == "🛢️ Daily Stock Register":
     suggested_rate = st.session_state["stk_suggested_rate"]
     last_info = st.session_state.get("stk_last_info", {})
 
-    # 📢 Show info banner
     if last_info.get("date"):
         st.markdown(
             f"<div class='autofill-info'>"
@@ -1801,7 +1787,230 @@ elif module == "⚙️ Master Setup (Parties/Vendors)":
     st.dataframe(sr_index(fetch_parties()), use_container_width=True)
 
 # ==========================================
-# MODULE 10: BACKUP & RESTORE
+# MODULE 10: FIX OLD ENTRIES (Recalculate)
+# ==========================================
+elif module == "🔧 Fix Old Entries (Recalculate)":
+    title("🔧 Fix Old Stock Entries — Recalculate All")
+
+    st.warning(
+        "⚠️ **Warning:** This utility will recalculate all your old stock entries. "
+        "First check the **Preview**, then click **Confirm Fix**. "
+        "Take a backup first (from Backup page) for safety."
+    )
+
+    st.markdown("### 📖 What Does This Utility Do?")
+    st.markdown("""
+    This fixes missing/zero rates in old entries:
+    
+    - **Opening Rate** → if 0, fills from previous entry's closing rate
+    - **Average Rate** → if 0, calculates from `total_purchase_amount / available_stock`
+    - **Closing Amount** → if 0, calculates from `closing_stock × avg_rate`
+    - **Actual Stock/Amount** → recalculates with dip
+    
+    ✅ First entry (no previous) is left untouched
+    ✅ No data is deleted — only fields are updated
+    """)
+
+    all_stock = read_df("""
+        SELECT id, entry_date, item_type, opening_stock, rate,
+               opening_amount, purchase_qty, purchase_rate, purchase_amount,
+               total_purchase_amount, avg_rate, available_stock,
+               sales_qty, sales_rate, sales_amount, total_sales_amount,
+               closing_amount, closing_stock, dip_diff, actual_stock, actual_amount
+        FROM stock_register
+        ORDER BY item_type ASC, entry_date ASC, id ASC
+    """)
+
+    if all_stock.empty:
+        st.info("No stock entries found — nothing to fix.")
+    else:
+        issues = []
+        for _, r in all_stock.iterrows():
+            problems = []
+            if (r["rate"] or 0) <= 0 and (r["opening_stock"] or 0) > 0:
+                problems.append("Opening Rate = 0")
+            if (r["avg_rate"] or 0) <= 0 and (r["available_stock"] or 0) > 0:
+                problems.append("Avg Rate = 0")
+            if (r["closing_amount"] or 0) <= 0 and (r["closing_stock"] or 0) > 0:
+                problems.append("Closing Amount = 0")
+            if problems:
+                issues.append({
+                    "Entry ID": r["id"],
+                    "Date": r["entry_date"],
+                    "Fuel": r["item_type"],
+                    "Opening Stock": r["opening_stock"],
+                    "Opening Rate": r["rate"],
+                    "Avg Rate": r["avg_rate"],
+                    "Closing Stock": r["closing_stock"],
+                    "Issues": ", ".join(problems),
+                })
+
+        col_a, col_b, col_c = st.columns(3)
+        col_a.metric("Total Entries", len(all_stock))
+        col_b.metric("Entries with Issues", len(issues))
+        col_c.metric("Healthy Entries", len(all_stock) - len(issues))
+
+        if issues:
+            st.markdown("### 🔍 Preview — Entries That Need Fixing")
+            st.dataframe(pd.DataFrame(issues), use_container_width=True)
+        else:
+            st.success("✅ All entries are already healthy! No fix needed.")
+
+        st.markdown("---")
+        st.markdown("### 🧮 Recalculation Logic (Example)")
+
+        with st.expander("📐 See how it calculates"):
+            st.markdown("""
+            **For each entry (in date order), per fuel type:**
+
+            1. **Opening Rate auto-fill:**
+               - If entry's `rate = 0` **and** `opening_stock > 0`:
+                 - Use previous entry's `closing_amount ÷ closing_stock`
+                 - Fallback: previous entry's `avg_rate`
+                 - Fallback: previous entry's `rate`
+            
+            2. **Opening Amount** = `opening_stock × rate`
+            
+            3. **Total Purchase Amount** = `opening_amount + purchase_amount`
+            
+            4. **Available Stock** = `opening_stock + purchase_qty`
+            
+            5. **Average Rate** (if 0):
+               - `total_purchase_amount ÷ available_stock`
+            
+            6. **Total Sales Amount** = `sales_qty × avg_rate`
+            
+            7. **Closing Amount** = `total_purchase_amount - total_sales_amount`
+            
+            8. **Closing Stock** = `available_stock - sales_qty`
+            
+            9. **Actual Stock** = `closing_stock + dip_diff`
+            
+            10. **Actual Amount** = `actual_stock × avg_rate`
+            """)
+
+        st.markdown("---")
+        sure = st.checkbox(
+            "✅ I understand — please recalculate & fix all old entries",
+            key="fix_old_confirm"
+        )
+
+        if st.button("🔧 Confirm — Fix All Old Entries", disabled=not sure,
+                     use_container_width=True, type="primary"):
+            with st.spinner("Recalculating all entries... please wait"):
+                fixed_count = 0
+                last_by_fuel = {}
+
+                for _, r in all_stock.iterrows():
+                    eid = int(r["id"])
+                    fuel = r["item_type"]
+
+                    op_stock = float(r["opening_stock"] or 0.0)
+                    op_rate = float(r["rate"] or 0.0)
+                    op_amount = float(r["opening_amount"] or 0.0)
+
+                    p_qty = float(r["purchase_qty"] or 0.0)
+                    p_rate = float(r["purchase_rate"] or 0.0)
+                    p_amount = float(r["purchase_amount"] or 0.0)
+
+                    tot_p_amount = float(r["total_purchase_amount"] or 0.0)
+                    avg_rate = float(r["avg_rate"] or 0.0)
+                    avail = float(r["available_stock"] or 0.0)
+
+                    s_qty = float(r["sales_qty"] or 0.0)
+                    s_rate = float(r["sales_rate"] or 0.0)
+                    s_amount = float(r["sales_amount"] or 0.0)
+                    tot_s_amount = float(r["total_sales_amount"] or 0.0)
+
+                    closing_amount = float(r["closing_amount"] or 0.0)
+                    closing_stock = float(r["closing_stock"] or 0.0)
+                    dip_diff = float(r["dip_diff"] or 0.0)
+                    actual_stock = float(r["actual_stock"] or 0.0)
+                    actual_amount = float(r["actual_amount"] or 0.0)
+
+                    prev = last_by_fuel.get(fuel)
+
+                    if op_rate <= 0 and op_stock > 0 and prev:
+                        if prev["closing_stock"] > 0 and prev["closing_amount"] > 0:
+                            op_rate = prev["closing_amount"] / prev["closing_stock"]
+                        elif prev["avg_rate"] > 0:
+                            op_rate = prev["avg_rate"]
+                        elif prev["rate"] > 0:
+                            op_rate = prev["rate"]
+
+                    op_amount = op_stock * op_rate
+
+                    if p_amount == 0 and p_qty > 0 and p_rate > 0:
+                        p_amount = p_qty * p_rate
+
+                    tot_p_amount = op_amount + p_amount
+                    avail = op_stock + p_qty
+
+                    if avg_rate <= 0 and avail > 0:
+                        avg_rate = tot_p_amount / avail
+
+                    if s_amount == 0 and s_qty > 0 and s_rate > 0:
+                        s_amount = s_qty * s_rate
+
+                    tot_s_amount = s_qty * avg_rate
+
+                    if closing_amount <= 0:
+                        closing_amount = tot_p_amount - tot_s_amount
+
+                    if closing_stock <= 0:
+                        closing_stock = avail - s_qty
+
+                    actual_stock = closing_stock + dip_diff
+                    actual_amount = actual_stock * avg_rate
+
+                    changed = (
+                        abs(op_rate - float(r["rate"] or 0.0)) > 0.001 or
+                        abs(op_amount - float(r["opening_amount"] or 0.0)) > 0.01 or
+                        abs(p_amount - float(r["purchase_amount"] or 0.0)) > 0.01 or
+                        abs(tot_p_amount - float(r["total_purchase_amount"] or 0.0)) > 0.01 or
+                        abs(avg_rate - float(r["avg_rate"] or 0.0)) > 0.0001 or
+                        abs(avail - float(r["available_stock"] or 0.0)) > 0.01 or
+                        abs(s_amount - float(r["sales_amount"] or 0.0)) > 0.01 or
+                        abs(tot_s_amount - float(r["total_sales_amount"] or 0.0)) > 0.01 or
+                        abs(closing_amount - float(r["closing_amount"] or 0.0)) > 0.01 or
+                        abs(closing_stock - float(r["closing_stock"] or 0.0)) > 0.01 or
+                        abs(actual_stock - float(r["actual_stock"] or 0.0)) > 0.01 or
+                        abs(actual_amount - float(r["actual_amount"] or 0.0)) > 0.01
+                    )
+
+                    if changed:
+                        execute_query(
+                            """UPDATE stock_register SET
+                                rate=?, opening_amount=?,
+                                purchase_amount=?, total_purchase_amount=?,
+                                avg_rate=?, available_stock=?,
+                                sales_amount=?, total_sales_amount=?,
+                                closing_amount=?, closing_stock=?,
+                                actual_stock=?, actual_amount=?
+                               WHERE id=?""",
+                            (op_rate, op_amount,
+                             p_amount, tot_p_amount,
+                             avg_rate, avail,
+                             s_amount, tot_s_amount,
+                             closing_amount, closing_stock,
+                             actual_stock, actual_amount, eid)
+                        )
+                        fixed_count += 1
+
+                    last_by_fuel[fuel] = {
+                        "closing_stock": closing_stock,
+                        "closing_amount": closing_amount,
+                        "avg_rate": avg_rate,
+                        "rate": op_rate,
+                    }
+
+            clear_data_caches()
+            st.success(f"✅ Fix complete! {fixed_count} entries updated.")
+            st.balloons()
+            st.rerun()
+
+# ==========================================
+# MODULE 11: BACKUP & RESTORE
 # ==========================================
 elif module == "💾 Backup & System Recovery":
     title("Database Backup & System Recovery")
