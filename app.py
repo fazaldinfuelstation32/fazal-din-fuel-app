@@ -381,15 +381,15 @@ def resequence_ids(table: str):
             conn.commit()
 
 
-def safe_float(raw, label="", min_value=None):
-    """Live conversion helper for text inputs."""
+def safe_float(raw, min_value=None):
+    """Parse a string to float safely. Returns 0.0 for empty/invalid."""
     raw = (raw or "").strip()
     if raw == "":
         return 0.0
     try:
         val = float(raw)
     except ValueError:
-        return None  # signals invalid
+        return 0.0
     if min_value is not None and val < min_value:
         return min_value
     return val
@@ -403,10 +403,10 @@ def blank_number(label: str, min_value=None, help=None, key=None) -> float:
     try:
         val = float(raw)
     except ValueError:
-        st.error(f"⚠️ '{label}' mein sirf number likhein (e.g. 123.45).")
+        st.error(f"⚠️ '{label}' must contain a number only (e.g. 123.45).")
         return 0.0
     if min_value is not None and val < min_value:
-        st.warning(f"⚠️ '{label}' {min_value} se kam nahi ho sakta — {min_value} le liya gaya.")
+        st.warning(f"⚠️ '{label}' cannot be less than {min_value} — using {min_value}.")
         return min_value
     return val
 
@@ -439,12 +439,30 @@ def last_closing_stock(item_type: str) -> float:
 
 
 def last_avg_rate(item_type: str) -> float:
-    """Fetch last closing average rate for auto-fill of opening rate."""
-    df = read_df("""SELECT avg_rate FROM stock_register
-                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""", params=(item_type,))
+    """Fetch last closing rate for auto-fill of opening rate.
+    Priority: avg_rate -> rate (opening rate) -> closing_amount / closing_stock."""
+    df = read_df("""SELECT avg_rate, rate, closing_amount, closing_stock
+                    FROM stock_register
+                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
+                 params=(item_type,))
     if df.empty:
         return 0.0
-    return float(df.iloc[0]["avg_rate"] or 0.0)
+    row = df.iloc[0]
+
+    avg_r = float(row["avg_rate"] or 0.0)
+    if avg_r > 0:
+        return avg_r
+
+    op_r = float(row["rate"] or 0.0)
+    if op_r > 0:
+        return op_r
+
+    cs = float(row["closing_stock"] or 0.0)
+    ca = float(row["closing_amount"] or 0.0)
+    if cs > 0 and ca > 0:
+        return ca / cs
+
+    return 0.0
 
 
 def next_voucher_no() -> str:
@@ -463,6 +481,17 @@ def fmt_ddmmyyyy(d) -> str:
         return pd.to_datetime(d).strftime("%d-%m-%Y")
     except Exception:
         return str(d)
+
+
+def live_preview(rows):
+    """Show live preview box with key-value rows."""
+    html = "<div class='live-preview'><h5>⚡ Live Preview</h5><table>"
+    for k, v in rows:
+        cls = " class='highlight'" if k.startswith("★") else ""
+        k_clean = k.replace("★ ", "")
+        html += f"<tr{cls}><td>{k_clean}</td><td>{v}</td></tr>"
+    html += "</table></div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_print_statement(party: str, p_type: str, op_bal: float, closing_bal: float,
@@ -698,17 +727,6 @@ def render_print_stock(from_date, to_date, item_filter="All"):
     components.html(trigger_html, height=60)
 
 
-def live_preview(rows):
-    """Show live preview box with key-value rows."""
-    html = "<div class='live-preview'><h5>⚡ Live Preview</h5><table>"
-    for k, v in rows:
-        cls = " class='highlight'" if k.startswith("★") else ""
-        k_clean = k.replace("★ ", "")
-        html += f"<tr{cls}><td>{k_clean}</td><td>{v}</td></tr>"
-    html += "</table></div>"
-    st.markdown(html, unsafe_allow_html=True)
-
-
 # ==========================================
 # 5. SIDEBAR NAVIGATION
 # ==========================================
@@ -900,25 +918,34 @@ elif module == "📄 Customer/Vendor Statements & Print":
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER (REVISED)
+# MODULE 4: DAILY STOCK REGISTER
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
 
-    st.caption("Dip Difference = Shortage/Excess amount entered during physical dip check. Minus means shortage, plus means excess. "
-               "Opening Stock aur Opening Rate dono last entry se auto-update hote hain.")
+    st.caption("Dip Difference = Shortage/Excess entered during physical dip check. "
+               "Negative means shortage, positive means excess. Opening Stock and Opening Rate "
+               "are auto-filled from the last saved entry.")
 
     item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
-    suggested_opening = last_closing_stock(item_type)
-    suggested_rate = last_avg_rate(item_type)
-    st.caption(f"↪️ Auto-filled Opening Stock for **{item_type}** = {suggested_opening:,.2f} Ltrs  |  "
-               f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
 
-    # Use session keys for reset behavior
     if "stock_form_version" not in st.session_state:
         st.session_state["stock_form_version"] = 0
 
     fver = st.session_state["stock_form_version"]
+
+    # Cache auto-filled values per (item_type, version) so they refresh only when needed
+    cache_key = f"stk_cache_{item_type}_{fver}"
+    if st.session_state.get("stk_last_key") != cache_key:
+        st.session_state["stk_suggested_opening"] = last_closing_stock(item_type)
+        st.session_state["stk_suggested_rate"] = last_avg_rate(item_type)
+        st.session_state["stk_last_key"] = cache_key
+
+    suggested_opening = st.session_state["stk_suggested_opening"]
+    suggested_rate = st.session_state["stk_suggested_rate"]
+
+    st.caption(f"Auto-filled Opening Stock for {item_type} = {suggested_opening:,.2f} Ltrs  |  "
+               f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
 
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
@@ -927,7 +954,8 @@ elif module == "🛢️ Daily Stock Register":
             st.text_input("Fuel Item", value=item_type, disabled=True, key=f"stk_item_{fver}")
             op_stock = st.number_input("Opening Stock (Ltrs)", value=float(suggested_opening),
                                         step=1.0, key=f"stk_opstk_{fver}")
-            op_rate_str = st.text_input("Opening Rate", value=f"{suggested_rate:.4f}" if suggested_rate else "",
+            op_rate_str = st.text_input("Opening Rate",
+                                         value=f"{suggested_rate:.4f}" if suggested_rate else "",
                                          placeholder="0", key=f"stk_oprate_{fver}")
         with c2:
             p_qty_str = st.text_input("Purchase Qty (Ltrs)", value="", placeholder="0", key=f"stk_pqty_{fver}")
@@ -936,17 +964,17 @@ elif module == "🛢️ Daily Stock Register":
             s_rate_str = st.text_input("Sales Rate", value="", placeholder="0", key=f"stk_srate_{fver}")
         with c3:
             dip_checked = st.checkbox("Physical Dip Check done today?", value=True, key=f"stk_dipchk_{fver}")
-            dip_str = st.text_input("Dip Shortage / Excess (+/− Ltrs)", value="", placeholder="0", key=f"stk_dip_{fver}")
+            dip_str = st.text_input("Dip Shortage / Excess (+/- Ltrs)", value="", placeholder="0", key=f"stk_dip_{fver}")
 
         review_stock = st.form_submit_button("👁️ Review & Save Stock Entry")
 
-    # Live parse of typed values
-    op_rate = safe_float(op_rate_str) or 0.0
-    p_qty = safe_float(p_qty_str) or 0.0
-    p_rate = safe_float(p_rate_str) or 0.0
-    s_qty = safe_float(s_qty_str) or 0.0
-    s_rate = safe_float(s_rate_str) or 0.0
-    dip_input = safe_float(dip_str) or 0.0
+    # Live parse
+    op_rate = safe_float(op_rate_str)
+    p_qty = safe_float(p_qty_str)
+    p_rate = safe_float(p_rate_str)
+    s_qty = safe_float(s_qty_str)
+    s_rate = safe_float(s_rate_str)
+    dip_input = safe_float(dip_str)
 
     def stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked):
         op_amount = op_stock * op_rate
@@ -971,9 +999,9 @@ elif module == "🛢️ Daily Stock Register":
 
     k = stock_calc(op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input, dip_checked)
 
-    # ✅ Live Preview (always visible)
+    # Live Preview (always visible when any input present)
     if any([op_stock, op_rate, p_qty, p_rate, s_qty, s_rate, dip_input]):
-        sign = "SHORTAGE (−)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
+        sign = "SHORTAGE (-)" if k["dip_diff"] < 0 else ("EXCESS (+)" if k["dip_diff"] > 0 else "NO DIFFERENCE")
         live_preview([
             ("Date", fmt_ddmmyyyy(e_date)),
             ("Fuel Item", item_type),
@@ -1037,14 +1065,13 @@ elif module == "🛢️ Daily Stock Register":
                      kp["closing_amount"], kp["closing_stock"], kp["dip_diff"], kp["actual_stock"], kp["act_amount"]),
                 )
                 st.session_state.pop("stock_pending", None)
-                # 🔄 Reset form: bump version to clear all text inputs
                 st.session_state["stock_form_version"] += 1
-                st.success("✅ Daily stock entry saved. Form cleared — next entry ke liye ready.")
+                st.success("✅ Daily stock entry saved. Form cleared — ready for the next entry.")
                 st.rerun()
 
-    st.markdown("### 📊 Existing Stock Records (Purani Upar, Nayi Neeche — Date Wise)")
+    st.markdown("### 📊 Existing Stock Records")
 
-    # ✅ ASC order: old entries first, new entries at bottom
+    # ASC order: oldest first, newest at bottom
     stock_df = read_df(
         """SELECT id AS [Entry ID], entry_date AS [Entry Date], item_type AS [Fuel Item],
                   opening_stock AS [Opening Stock], rate AS [Rate], purchase_qty AS [Purchase Qty],
@@ -1057,7 +1084,7 @@ elif module == "🛢️ Daily Stock Register":
 
     if not stock_df.empty:
         stock_df["Dip Status"] = stock_df["Dip Difference"].apply(
-            lambda x: "Shortage (−)" if x < 0 else ("Excess (+)" if x > 0 else "Balanced"))
+            lambda x: "Shortage (-)" if x < 0 else ("Excess (+)" if x > 0 else "Balanced"))
         st.dataframe(sr_index(stock_df), use_container_width=True)
         download_csv(sr_index(stock_df), "stock_register.csv")
 
@@ -1096,7 +1123,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         [
             "🧾 Fuel Sale Entry  —  Cash In (Debit)",
             "💵 Payment Received from Customer  —  Cash Out (Credit)",
-            "🔄 Combined (sale + payment on the exact same day)",
+            "🔄 Combined (sale + payment on the same day)",
         ],
         key="cust_entry_kind",
     )
@@ -1128,7 +1155,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                 desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
             fuel = "Cash Payment/Voucher"
             qty_str, rate_str = "", ""
-            payment = safe_float(pay_str) or 0.0
+            payment = safe_float(pay_str)
         else:
             with c1:
                 txn_date = st.date_input("Transaction Date", date.today(), format="DD-MM-YYYY", key=f"c_date_{cver}")
@@ -1140,12 +1167,12 @@ elif module == "💳 Party Daily Sale & Credit Entry":
                 rate_str = st.text_input("Rate", value="", placeholder="0", key=f"c_rate_{cver}")
                 pay_str = st.text_input("Amount Received (Rs.)", value="", placeholder="0", key=f"c_pay_{cver}")
                 desc = st.text_input("Description / Slip No.", key=f"c_desc_{cver}")
-            payment = safe_float(pay_str) or 0.0
+            payment = safe_float(pay_str)
         review_cust = st.form_submit_button("👁️ Review Entry")
 
     # Live preview
-    qty = safe_float(qty_str) or 0.0
-    rate = safe_float(rate_str) or 0.0
+    qty = safe_float(qty_str)
+    rate = safe_float(rate_str)
     debit = qty * rate if fuel != "Cash Payment/Voucher" else 0.0
     credit = payment
 
@@ -1172,7 +1199,7 @@ elif module == "💳 Party Daily Sale & Credit Entry":
         credit = pend["payment"]
 
         if debit == 0 and credit == 0:
-            st.warning("⚠️ Nothing to save — enter either the Qty/Rate for a sale or a payment amount.")
+            st.warning("⚠️ Nothing to save — enter either Qty/Rate for a sale or a payment amount.")
 
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
@@ -1234,7 +1261,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         [
             "🚛 Fuel Purchase / Bill Entry  —  Cash In (Credit)",
             "💵 Advance / Payment to Vendor  —  Cash Out (Debit)",
-            "🔄 Combined (purchase + payment on the exact same day)",
+            "🔄 Combined (purchase + payment on the same day)",
         ],
         key="vend_entry_kind",
     )
@@ -1264,7 +1291,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                 desc = st.text_input("Description", key=f"v_desc_{vver}")
             fuel = "Direct Payment"
             qty_str, rate_str = "", ""
-            paid = safe_float(paid_str) or 0.0
+            paid = safe_float(paid_str)
         else:
             with c1:
                 txn_date = st.date_input("Date", date.today(), format="DD-MM-YYYY", key=f"v_date_{vver}")
@@ -1275,11 +1302,11 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
                 rate_str = st.text_input("Purchase Rate", value="", placeholder="0", key=f"v_rate_{vver}")
                 paid_str = st.text_input("Payment Paid (Rs.)", value="", placeholder="0", key=f"v_paid_{vver}")
                 desc = st.text_input("Invoice / Tanker No.", key=f"v_desc_{vver}")
-            paid = safe_float(paid_str) or 0.0
+            paid = safe_float(paid_str)
         review_vend = st.form_submit_button("👁️ Review Entry")
 
-    qty = safe_float(qty_str) or 0.0
-    rate = safe_float(rate_str) or 0.0
+    qty = safe_float(qty_str)
+    rate = safe_float(rate_str)
     credit = qty * rate if fuel != "Direct Payment" else 0.0
     debit = paid
 
@@ -1306,7 +1333,7 @@ elif module == "🚛 Vendor Purchasing & Dip Stock":
         debit = pend["paid"]
 
         if credit == 0 and debit == 0:
-            st.warning("⚠️ Nothing to save — enter either the purchase Qty/Rate or a payment amount.")
+            st.warning("⚠️ Nothing to save — enter either purchase Qty/Rate or a payment amount.")
 
         st.markdown("<div class='review-box'><b>🔎 Review before saving</b></div>", unsafe_allow_html=True)
         st.table(pd.DataFrame([{
@@ -1467,7 +1494,7 @@ elif module == "⚖️ Stock vs Sale Month-End Match":
     if not rec.empty:
         rec["Sales Variance"] = rec["Total Stock Sales"] - rec["Total Ledger Sales"]
         rec["Dip Status"] = rec["Total Dip Variance"].apply(
-            lambda x: "Shortage (−)" if x < 0 else ("Excess (+)" if x > 0 else "Balanced"))
+            lambda x: "Shortage (-)" if x < 0 else ("Excess (+)" if x > 0 else "Balanced"))
         st.dataframe(sr_index(rec), use_container_width=True)
         download_csv(sr_index(rec), "reconciliation.csv")
     else:
