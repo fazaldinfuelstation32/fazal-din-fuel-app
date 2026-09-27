@@ -33,10 +33,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# 🔥 GLOBAL ENTER-KEY BLOCKER
-# Streamlit ke text inputs pe Enter dabane se form submit ho jata hai.
-# Yeh JS har input pe Enter key ko rok deta hai (sirf Tab jaisa behave karta hai).
-# Save button pe click karne se hi submit hoga.
+# GLOBAL ENTER-KEY BLOCKER
 components.html(
     """
     <script>
@@ -44,7 +41,6 @@ components.html(
         function blockEnterOnInputs() {
             try {
                 const doc = window.parent.document;
-                // Saare text/password/number inputs pe Enter block karo
                 const inputs = doc.querySelectorAll(
                     'input[type="text"], input[type="password"], input[type="number"], ' +
                     'input[type="search"], textarea'
@@ -56,7 +52,6 @@ components.html(
                         if (e.key === 'Enter' || e.keyCode === 13) {
                             e.preventDefault();
                             e.stopPropagation();
-                            // Focus move to next input (Tab jaisa behaviour)
                             const all = Array.from(doc.querySelectorAll(
                                 'input[type="text"], input[type="password"], input[type="number"], ' +
                                 'input[type="search"], textarea'
@@ -159,6 +154,11 @@ st.markdown(
             background: #fef3c7; font-weight: 800; color: #92400e;
             border-bottom: 2px solid #f59e0b;
         }
+        .autofill-info {
+            background: #eff6ff; border: 1px solid #3b82f6; border-left: 5px solid #2563eb;
+            border-radius: 8px; padding: 10px 14px; margin-bottom: 12px;
+            font-size: 13.5px; color: #1e3a8a;
+        }
         div.stButton > button, div.stFormSubmitButton > button, div.stDownloadButton > button {
             background: linear-gradient(90deg, #1c8b4e, #2e7d32);
             color: #ffffff; border: none; border-radius: 8px; font-weight: 700;
@@ -180,7 +180,7 @@ def title(text: str):
 
 
 # ==========================================
-# 2. LOGIN (with session persistence)
+# 2. LOGIN
 # ==========================================
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
@@ -398,14 +398,6 @@ def payload_token(*parts) -> str:
     return hashlib.md5("|".join(str(p) for p in parts).encode()).hexdigest()
 
 
-def already_saved(token: str) -> bool:
-    saved = st.session_state.setdefault("saved_tokens", set())
-    if token in saved:
-        return True
-    saved.add(token)
-    return False
-
-
 @st.cache_data(ttl=30, show_spinner=False)
 def cached_fetch_parties(p_type=None):
     base = ("SELECT id, name AS [Party Name], type AS [Type], "
@@ -523,34 +515,66 @@ def download_csv(df: pd.DataFrame, filename: str, label="⬇️ Download CSV"):
                            file_name=filename, mime="text/csv")
 
 
-def last_closing_stock(item_type: str) -> float:
-    df = read_df("""SELECT closing_stock, dip_diff FROM stock_register
-                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""", params=(item_type,))
-    if df.empty:
-        return 0.0
-    row = df.iloc[0]
-    return (row["closing_stock"] or 0.0) + (row["dip_diff"] or 0.0)
+# ==========================================
+# ✅ FIXED: Last Entry Info for Auto-fill
+# ==========================================
+def get_last_entry_info(item_type: str) -> dict:
+    """
+    Get the previous entry's closing stock + effective rate for auto-fill.
+    
+    Carry-forward logic:
+      - Opening Stock = last closing_stock + dip_diff
+      - Opening Rate  = last closing_amount / last closing_stock
+                        (fallback: actual_amount/actual_stock)
+                        (fallback: avg_rate)
+                        (fallback: rate)
+    """
+    df = read_df(
+        """SELECT entry_date, closing_stock, dip_diff, closing_amount,
+                  actual_stock, actual_amount, avg_rate, rate
+           FROM stock_register
+           WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
+        params=(item_type,))
 
-
-def last_avg_rate(item_type: str) -> float:
-    df = read_df("""SELECT avg_rate, rate, closing_amount, closing_stock
-                    FROM stock_register
-                    WHERE item_type = ? ORDER BY entry_date DESC, id DESC LIMIT 1""",
-                 params=(item_type,))
     if df.empty:
-        return 0.0
+        return {"opening_stock": 0.0, "opening_rate": 0.0, "date": None, "source": "No previous entry"}
+
     row = df.iloc[0]
-    avg_r = float(row["avg_rate"] or 0.0)
-    if avg_r > 0:
-        return avg_r
-    op_r = float(row["rate"] or 0.0)
-    if op_r > 0:
-        return op_r
+
     cs = float(row["closing_stock"] or 0.0)
+    dip = float(row["dip_diff"] or 0.0)
+    next_opening_stock = cs + dip
+
     ca = float(row["closing_amount"] or 0.0)
+    act_s = float(row["actual_stock"] or 0.0)
+    act_a = float(row["actual_amount"] or 0.0)
+    avg_r = float(row["avg_rate"] or 0.0)
+    op_r = float(row["rate"] or 0.0)
+
+    rate_source = ""
+    next_rate = 0.0
+
     if cs > 0 and ca > 0:
-        return ca / cs
-    return 0.0
+        next_rate = ca / cs
+        rate_source = "closing_amount / closing_stock"
+    elif act_s > 0 and act_a > 0:
+        next_rate = act_a / act_s
+        rate_source = "actual_amount / actual_stock"
+    elif avg_r > 0:
+        next_rate = avg_r
+        rate_source = "avg_rate"
+    elif op_r > 0:
+        next_rate = op_r
+        rate_source = "opening rate"
+    else:
+        rate_source = "no rate available"
+
+    return {
+        "opening_stock": next_opening_stock,
+        "opening_rate": next_rate,
+        "date": str(row["entry_date"]),
+        "source": rate_source,
+    }
 
 
 def next_voucher_no() -> str:
@@ -1026,7 +1050,7 @@ elif module == "📄 Customer/Vendor Statements & Print":
         render_print_statement(party, p_type, op_bal, closing_bal, stmt, from_date, to_date)
 
 # ==========================================
-# MODULE 4: DAILY STOCK REGISTER
+# MODULE 4: DAILY STOCK REGISTER (FIXED)
 # ==========================================
 elif module == "🛢️ Daily Stock Register":
     title("Daily Stock Register")
@@ -1037,24 +1061,51 @@ elif module == "🛢️ Daily Stock Register":
 
     item_type = st.selectbox("Fuel Item", ["Petrol", "Diesel"], key="stock_item_type_pick")
 
+    # 🔄 Manual refresh button (in case auto-fill needs to be forced)
+    col_ref, col_spacer = st.columns([1, 5])
+    with col_ref:
+        if st.button("🔄 Refresh Auto-fill", key="refresh_autofill_btn"):
+            st.session_state["stock_form_version"] = st.session_state.get("stock_form_version", 0) + 1
+            st.rerun()
+
     if "stock_form_version" not in st.session_state:
         st.session_state["stock_form_version"] = 0
 
     fver = st.session_state["stock_form_version"]
 
-    cache_key = f"stk_cache_{item_type}_{fver}"
+    # ✅ Auto-fill logic — always recalculate on version/fuel change
+    cache_key = f"stk_{item_type}_{fver}"
     if st.session_state.get("stk_last_key") != cache_key:
-        st.session_state["stk_suggested_opening"] = last_closing_stock(item_type)
-        st.session_state["stk_suggested_rate"] = last_avg_rate(item_type)
+        info = get_last_entry_info(item_type)
+        st.session_state["stk_suggested_opening"] = info["opening_stock"]
+        st.session_state["stk_suggested_rate"] = info["opening_rate"]
+        st.session_state["stk_last_info"] = info
         st.session_state["stk_last_key"] = cache_key
 
     suggested_opening = st.session_state["stk_suggested_opening"]
     suggested_rate = st.session_state["stk_suggested_rate"]
+    last_info = st.session_state.get("stk_last_info", {})
 
-    st.caption(f"Auto-filled Opening Stock for {item_type} = {suggested_opening:,.2f} Ltrs  |  "
-               f"Auto Opening Rate = Rs. {suggested_rate:,.4f}")
+    # 📢 Show info banner
+    if last_info.get("date"):
+        st.markdown(
+            f"<div class='autofill-info'>"
+            f"<b>✅ Auto-filled from last {item_type} entry on {fmt_ddmmyyyy(last_info['date'])}:</b> "
+            f"Opening Stock = <b>{suggested_opening:,.2f} Ltrs</b> | "
+            f"Opening Rate = <b>Rs. {suggested_rate:,.4f}</b> "
+            f"<span style='color:#64748b;font-size:12px;'>(source: {last_info.get('source','-')})</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<div class='autofill-info'>"
+            f"<b>ℹ️ No previous {item_type} entry found.</b> "
+            f"Enter Opening Stock and Opening Rate manually for the first entry."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
-    # Form with submit button only — global JS blocks Enter submit
     with st.form("stock_form", clear_on_submit=False):
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -1111,6 +1162,8 @@ elif module == "🛢️ Daily Stock Register":
         live_preview([
             ("Date", fmt_ddmmyyyy(e_date)),
             ("Fuel Item", item_type),
+            ("Opening Stock", f"{op_stock:,.2f} Ltrs"),
+            ("Opening Rate", f"Rs. {op_rate:,.4f}"),
             ("Opening Amount", f"Rs. {k['op_amount']:,.2f}"),
             ("Purchase Amount", f"Rs. {k['p_amount']:,.2f}"),
             ("Total Purchase Amount", f"Rs. {k['tot_p_amount']:,.2f}"),
@@ -1127,8 +1180,10 @@ elif module == "🛢️ Daily Stock Register":
         ])
 
     if save_stock:
-        if not any([p_qty, s_qty, dip_input]) and op_stock == 0 and suggested_opening == 0:
-            st.warning("Nothing to save — enter at least Purchase / Sales / Dip.")
+        if op_rate <= 0:
+            st.error("⚠️ Opening Rate is 0 — please enter a valid opening rate before saving.")
+        elif op_stock <= 0 and p_qty <= 0 and s_qty <= 0:
+            st.warning("Nothing to save — enter at least Opening Stock / Purchase / Sales.")
         else:
             execute_query(
                 """INSERT INTO stock_register (
@@ -1494,7 +1549,6 @@ elif module == "✏️ Edit / Manage Entries":
                 if st.button("🗑️ Delete Entry Permanently", disabled=not sure, use_container_width=True):
                     execute_query("DELETE FROM ledger WHERE id = ?", (int(entry_id),))
                     resequence_ids("ledger")
-                    st.session_state.pop("saved_tokens", None)
                     clear_data_caches()
                     st.success(f"✅ Entry ID {entry_id} deleted and IDs re-sequenced.")
                     st.rerun()
